@@ -1,0 +1,10 @@
+[package]
+name = "windows-link"
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.71"
+description = "windows-link 0.2.1 with an import library on windows-gnu (see src/lib.rs)"
+license = "MIT OR Apache-2.0"
+
+[target.'cfg(all(windows, target_env = "gnu"))'.dependencies]
+windows-targets = "0.52.6"

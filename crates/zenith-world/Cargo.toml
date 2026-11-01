@@ -1,0 +1,17 @@
+[package]
+name = "zenith-world"
+description = "World data and the pure functions over it: generation, light, physics, saves."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lz4_flex.workspace = true
+postcard.workspace = true
+serde.workspace = true
+zenith-content = { path = "../zenith-content" }
+zenith-core = { path = "../zenith-core" }
+
+[lints]
+workspace = true

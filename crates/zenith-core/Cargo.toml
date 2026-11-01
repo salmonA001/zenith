@@ -1,0 +1,14 @@
+[package]
+name = "zenith-core"
+description = "Deterministic primitives: positions, RNG, noise, palettes, worker pool. No gameplay."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
