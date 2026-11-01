@@ -1,0 +1,21 @@
+[package]
+name = "zenith-agent"
+description = "A client with no window: world replica, prediction, autopilot and the control protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zenith-content = { path = "../zenith-content" }
+zenith-core = { path = "../zenith-core" }
+zenith-protocol = { path = "../zenith-protocol" }
+zenith-world = { path = "../zenith-world" }
+
+[dev-dependencies]
+zenith-server = { path = "../zenith-server" }
+
+[lints]
+workspace = true

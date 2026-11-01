@@ -1,12 +1,11 @@
 //! World generation: a pure function from a seed and a chunk position to a chunk.
-mod features;
+pub mod features;
 mod shape;
 
-pub use features::REACH;
+pub use features::{REACH, Stamp, Tree};
 pub use shape::{Biome, Column, FarSample, foliage_tint, grass_tint, water_tint};
 
 use crate::chunk::Chunk;
-use features::Stamp;
 use shape::{lerp, smoothstep};
 use std::cell::RefCell;
 use std::sync::Arc;

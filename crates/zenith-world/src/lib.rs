@@ -14,6 +14,7 @@
 pub mod chunk;
 pub mod worldgen;
 pub mod light;
+pub mod path;
 pub mod physics;
 pub mod pick;
 pub mod store;

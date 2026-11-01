@@ -408,6 +408,49 @@ impl Registry {
         None
     }
 
+    /// Ticks to break a block with an item in hand, or `None` if it cannot be broken. The server
+    /// counts these for real; the client counts them too, to draw the cracks.
+    pub fn dig_ticks(&self, state: BlockState, held: Option<u16>) -> Option<f32> {
+        let def = self.block(state);
+        if def.hardness < 0.0 {
+            return None;
+        }
+        let (tool, tier, speed) = self.tool_of(held);
+        let right_tool = def.tool == Tool::Any || def.tool == tool;
+        let harvest = def.tier == 0 || (tool == def.tool && tier >= def.tier);
+        let multiplier = if right_tool { speed as f32 } else { 1.0 };
+        Some((def.hardness * if harvest { 30.0 } else { 100.0 } / multiplier).max(0.0))
+    }
+
+    /// Whether breaking a block with this item yields its drop.
+    pub fn can_harvest(&self, state: BlockState, held: Option<u16>) -> bool {
+        let def = self.block(state);
+        let (tool, tier, _) = self.tool_of(held);
+        def.tier == 0 || (tool == def.tool && tier >= def.tier)
+    }
+
+    fn tool_of(&self, held: Option<u16>) -> (Tool, u8, u8) {
+        match held.and_then(|h| self.item(h)).map(|i| i.kind) {
+            Some(ItemKind::Tool { tool, tier, speed, .. }) => (tool, tier, speed),
+            _ => (Tool::Any, 0, 1),
+        }
+    }
+
+    /// The recipes that make an item, as written.
+    pub fn recipes_for(&self, item: u16) -> Vec<&RecipeDef> {
+        let name = self.item(item).map(|i| i.name.as_str());
+        self.data.recipes.iter().filter(|r| Some(r.out.as_str()) == name).collect()
+    }
+
+    /// Whether an item fits a recipe's ingredient name, which may be a `#tag`.
+    pub fn item_matches(&self, item: u16, ingredient: &str) -> bool {
+        let Some(def) = self.item(item) else { return false };
+        match ingredient.strip_prefix('#') {
+            Some(tag) => def.tags.iter().any(|t| t == tag),
+            None => def.name == ingredient,
+        }
+    }
+
     /// Reads a pack from JSON text.
     pub fn parse_pack(json: &str) -> Result<Pack, String> {
         serde_json::from_str(json).map_err(|e| format!("bad content pack: {e}"))

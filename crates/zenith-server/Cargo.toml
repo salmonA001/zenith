@@ -1,0 +1,24 @@
+[package]
+name = "zenith-server"
+description = "The authoritative game: simulation, persistence and the dedicated server. No GPU, no window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zenith-server"
+path = "src/bin/zenith-server.rs"
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lz4_flex.workspace = true
+zenith-content = { path = "../zenith-content" }
+zenith-core = { path = "../zenith-core" }
+zenith-protocol = { path = "../zenith-protocol" }
+zenith-world = { path = "../zenith-world" }
+
+[lints]
+workspace = true
