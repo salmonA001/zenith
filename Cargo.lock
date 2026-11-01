@@ -2591,6 +2591,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
+name = "zenith-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zenith-content",
+ "zenith-core",
+ "zenith-protocol",
+ "zenith-server",
+ "zenith-world",
+]
+
+[[package]]
 name = "zenith-client"
 version = "0.1.0"
 dependencies = [

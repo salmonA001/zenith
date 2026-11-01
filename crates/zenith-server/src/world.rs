@@ -166,6 +166,12 @@ impl ServerWorld {
         self.pending.len()
     }
 
+    /// Whether forgetting `pos` loses nothing: the disk has it, or the generator can make it again.
+    pub fn can_unload(&self, pos: ChunkPos) -> bool {
+        self.disk.is_some()
+            || (!self.dirty.contains(&pos) && self.map.chunks.get(&pos).is_none_or(|c| c.modified == 0))
+    }
+
     /// Saves what changed in `pos` and forgets it.
     pub fn unload(&mut self, pos: ChunkPos) {
         self.save_chunk(pos);

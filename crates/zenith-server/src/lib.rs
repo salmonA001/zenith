@@ -571,7 +571,9 @@ impl Server {
             let far: Vec<ChunkPos> =
                 self.world.map.chunks.keys().copied().filter(|pos| centers.iter().all(|c| c.distance(*pos) > keep)).collect();
             for pos in far {
-                self.world.unload(pos);
+                if self.world.can_unload(pos) {
+                    self.world.unload(pos);
+                }
             }
             let (world, ents) = (&self.world, &mut self.entities);
             // What was in a chunk goes with it: nothing simulates where nobody is.
@@ -649,7 +651,16 @@ impl Server {
             for id in near {
                 let Some(e) = self.entities.list.get_mut(&id) else { continue };
                 let Data::Item { stack, delay } = &mut e.data else { continue };
-                if *delay > 0 || e.body.pos.distance_squared(player.body.pos + DVec3::Y * 0.5) > 2.25 {
+                if *delay > 0 {
+                    continue;
+                }
+                let to = player.body.pos + DVec3::Y * 0.5 - e.body.pos;
+                let distance2 = to.length_squared();
+                if distance2 > 2.25 {
+                    // Close by, it drifts over: nobody should have to stand on a drop to get it.
+                    if distance2 < 16.0 {
+                        e.body.vel += to.normalize_or_zero() * 0.03;
+                    }
                     continue;
                 }
                 match player.pick_up(&reg, *stack) {
