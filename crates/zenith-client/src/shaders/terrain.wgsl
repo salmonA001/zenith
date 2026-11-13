@@ -8,7 +8,6 @@
 @group(0) @binding(5) var materials: texture_2d_array<f32>;
 
 const POS_BIAS: f32 = 512.0;
-const TILE_SIZE: f32 = 32.0;
 const SWAY_SOFT: u32 = 8u;
 const SWAY_TOP: u32 = 16u;
 const WATER: u32 = 32u;
@@ -87,14 +86,16 @@ fn vs_main(v: VertexIn) -> VertexOut {
 
 // Sharp pixels up close, and proper anisotropic filtering at a distance, from one sampler.
 fn sample_tile(uv: vec2<f32>, layer: u32) -> vec4<f32> {
-    let p = uv * TILE_SIZE;
+    // As many texels across as the tiles were painted with.
+    let tile_size = f32(textureDimensions(tiles).x);
+    let p = uv * tile_size;
     let dx = dpdx(uv);
     let dy = dpdy(uv);
     let width = max(abs(dpdx(p)) + abs(dpdy(p)), vec2<f32>(0.0001));
     // Stays on a texel's centre until the last pixel before the seam, and blends across only that.
     let seam = floor(p + 0.5);
     let snapped = seam + clamp((p - seam) / width, vec2<f32>(-0.5), vec2<f32>(0.5));
-    return textureSampleGrad(tiles, tile_sampler, snapped / TILE_SIZE, layer, dx, dy);
+    return textureSampleGrad(tiles, tile_sampler, snapped / tile_size, layer, dx, dy);
 }
 
 // What a surface is made of, texel by texel: which way it faces, how rough it is, how metal.

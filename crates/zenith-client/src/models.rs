@@ -320,68 +320,224 @@ const fn glowing(part: Part) -> Part {
     Part { glow: true, ..part }
 }
 
-fn humanoid(skin: [u8; 3], shirt: [u8; 3], pants: [u8; 3], arms: Motion, slim: f32) -> Vec<Part> {
+/// What sets one two-legged creature apart from another: its hair if it has any, its eyes, and
+/// whether its bones show.
+#[derive(Clone, Copy)]
+struct Features {
+    hair: Option<[u8; 3]>,
+    /// The white of the eye, if it has one, and the eye itself.
+    white: Option<[u8; 3]>,
+    eye: [u8; 3],
+    mouth: [u8; 3],
+    shoes: [u8; 3],
+    /// Ribs drawn on the chest.
+    ribs: Option<[u8; 3]>,
+}
+
+fn darker(c: [u8; 3], by: f32) -> [u8; 3] {
+    c.map(|v| (f32::from(v) * by) as u8)
+}
+
+/// Something that walks on two legs: a head with a face, a neck, a body with a belt, legs ending in
+/// shoes, and arms in sleeves ending in hands.
+fn humanoid(skin: [u8; 3], shirt: [u8; 3], pants: [u8; 3], arms: Motion, slim: f32, f: Features) -> Vec<Part> {
     let w = slim;
+    let head = [0.0, 1.45, 0.0];
     let mut parts = vec![
-        p([0.0, 1.45, 0.0], [-0.25, 0.0, -0.25], [0.25, 0.5, 0.25], skin, Motion::Head),
+        p(head, [-0.25, 0.0, -0.25], [0.25, 0.5, 0.25], skin, Motion::Head),
+        p([0.0, 1.38, 0.0], [-0.09 * w, 0.0, -0.08 * w], [0.09 * w, 0.1, 0.08 * w], darker(skin, 0.9), Motion::Still),
         p([0.0, 0.7, 0.0], [-0.25 * w, 0.0, -0.13 * w], [0.25 * w, 0.75, 0.13 * w], shirt, Motion::Still),
-        p([-0.125 * w, 0.72, 0.0], [-0.11 * w, -0.72, -0.12 * w], [0.11 * w, 0.0, 0.12 * w], pants, Motion::SwingA),
-        p([0.125 * w, 0.72, 0.0], [-0.11 * w, -0.72, -0.12 * w], [0.11 * w, 0.0, 0.12 * w], pants, Motion::SwingB),
+        p(
+            [0.0, 0.7, 0.0],
+            [-0.255 * w, 0.0, -0.135 * w],
+            [0.255 * w, 0.07, 0.135 * w],
+            darker(pants, 0.6),
+            Motion::Still,
+        ),
     ];
+    // The face: eyes under a brow, a nose, a mouth.
+    for side in [-1.0f32, 1.0] {
+        let x = |a: f32, b: f32| if side < 0.0 { (-b, -a) } else { (a, b) };
+        if let Some(white) = f.white {
+            let (x0, x1) = x(0.06, 0.17);
+            parts.push(p(head, [x0, 0.23, 0.25], [x1, 0.31, 0.258], white, Motion::Head));
+        }
+        let (x0, x1) = x(0.08, 0.13);
+        parts.push(p(head, [x0, 0.23, 0.252], [x1, 0.31, 0.264], f.eye, Motion::Head));
+        let (x0, x1) = x(0.05, 0.18);
+        parts.push(p(head, [x0, 0.32, 0.25], [x1, 0.345, 0.268], darker(f.hair.unwrap_or(skin), 0.7), Motion::Head));
+    }
+    parts.push(p(head, [-0.035, 0.15, 0.25], [0.035, 0.25, 0.29], darker(skin, 0.92), Motion::Head));
+    parts.push(p(head, [-0.08, 0.075, 0.25], [0.08, 0.105, 0.26], f.mouth, Motion::Head));
+    if let Some(hair) = f.hair {
+        parts.push(p(head, [-0.265, 0.38, -0.265], [0.265, 0.53, 0.265], hair, Motion::Head));
+        parts.push(p(head, [-0.265, 0.08, -0.265], [0.265, 0.4, -0.17], hair, Motion::Head));
+        for x in [-0.265f32, 0.215] {
+            parts.push(p(head, [x, 0.2, -0.2], [x + 0.05, 0.4, 0.06], hair, Motion::Head));
+        }
+    }
+    if let Some(bone) = f.ribs {
+        for k in 0..4 {
+            let y = 0.28 + k as f32 * 0.11;
+            parts.push(p(
+                [0.0, 0.7, 0.0],
+                [-0.2 * w, y, 0.13 * w],
+                [0.2 * w, y + 0.045, 0.14 * w],
+                bone,
+                Motion::Still,
+            ));
+        }
+    }
+    // Legs, and what is on their feet.
+    for (x, motion) in [(-0.125f32, Motion::SwingA), (0.125, Motion::SwingB)] {
+        let hip = [x * w, 0.72, 0.0];
+        parts.push(p(hip, [-0.11 * w, -0.72, -0.12 * w], [0.11 * w, 0.0, 0.12 * w], pants, motion));
+        parts.push(p(hip, [-0.12 * w, -0.72, -0.13 * w], [0.12 * w, -0.6, 0.2 * w], f.shoes, motion));
+    }
+    // Arms: a sleeve to the elbow, bare below it, and a hand.
     let (left, right) =
         if arms == Motion::Reach { (Motion::Reach, Motion::Reach) } else { (Motion::SwingB, Motion::SwingA) };
-    parts.push(p([-0.36 * w, 1.38, 0.0], [-0.1 * w, -0.7, -0.12 * w], [0.1 * w, 0.05, 0.12 * w], skin, left));
-    parts.push(p([0.36 * w, 1.38, 0.0], [-0.1 * w, -0.7, -0.12 * w], [0.1 * w, 0.05, 0.12 * w], skin, right));
+    for (x, motion) in [(-0.36f32, left), (0.36, right)] {
+        let shoulder = [x * w, 1.38, 0.0];
+        parts.push(p(shoulder, [-0.1 * w, -0.7, -0.12 * w], [0.1 * w, 0.05, 0.12 * w], skin, motion));
+        parts.push(p(shoulder, [-0.112 * w, -0.34, -0.132 * w], [0.112 * w, 0.07, 0.132 * w], shirt, motion));
+        parts.push(p(
+            shoulder,
+            [-0.105 * w, -0.72, -0.125 * w],
+            [0.105 * w, -0.58, 0.125 * w],
+            darker(skin, 0.9),
+            motion,
+        ));
+    }
     parts
 }
 
+/// Something that walks on four legs: a body, a head with eyes and ears, legs ending in hooves,
+/// and a tail.
 fn quadruped(body: [u8; 3], head: [u8; 3], legs: [u8; 3], width: f32) -> Vec<Part> {
     let w = width;
-    vec![
+    let neck = [0.0, 0.62, 0.42];
+    let mut v = vec![
         p([0.0, 0.45, 0.0], [-0.3 * w, 0.0, -0.45], [0.3 * w, 0.42, 0.45], body, Motion::Still),
-        p([0.0, 0.62, 0.42], [-0.2, -0.16, 0.0], [0.2, 0.2, 0.34], head, Motion::Head),
-        p([-0.2 * w, 0.45, 0.32], [-0.08, -0.45, -0.08], [0.08, 0.0, 0.08], legs, Motion::SwingA),
-        p([0.2 * w, 0.45, 0.32], [-0.08, -0.45, -0.08], [0.08, 0.0, 0.08], legs, Motion::SwingB),
-        p([-0.2 * w, 0.45, -0.32], [-0.08, -0.45, -0.08], [0.08, 0.0, 0.08], legs, Motion::SwingB),
-        p([0.2 * w, 0.45, -0.32], [-0.08, -0.45, -0.08], [0.08, 0.0, 0.08], legs, Motion::SwingA),
-    ]
+        p(neck, [-0.2, -0.16, 0.0], [0.2, 0.2, 0.34], head, Motion::Head),
+    ];
+    for (x, z, motion) in [
+        (-0.2f32, 0.32f32, Motion::SwingA),
+        (0.2, 0.32, Motion::SwingB),
+        (-0.2, -0.32, Motion::SwingB),
+        (0.2, -0.32, Motion::SwingA),
+    ] {
+        let hip = [x * w, 0.45, z];
+        v.push(p(hip, [-0.08, -0.45, -0.08], [0.08, 0.0, 0.08], legs, motion));
+        v.push(p(hip, [-0.088, -0.45, -0.088], [0.088, -0.36, 0.088], darker(legs, 0.45), motion));
+    }
+    for side in [-1.0f32, 1.0] {
+        // An eye on each side of the face, and an ear above it.
+        let (x0, x1) = if side < 0.0 { (-0.2, -0.13) } else { (0.13, 0.2) };
+        v.push(p(neck, [x0, 0.04, 0.3], [x1, 0.11, 0.345], [24, 22, 22], Motion::Head));
+        let (x0, x1) = if side < 0.0 { (-0.27, -0.19) } else { (0.19, 0.27) };
+        v.push(p(neck, [x0, 0.12, 0.04], [x1, 0.22, 0.14], darker(head, 0.85), Motion::Head));
+    }
+    v.push(p([0.0, 0.8, -0.45], [-0.04, -0.2, -0.05], [0.04, 0.0, 0.0], darker(body, 0.85), Motion::SwingA));
+    v
 }
 
 fn parts_of(kind: EntityKind) -> Vec<Part> {
+    let living = Features {
+        hair: Some([74, 50, 32]),
+        white: Some([244, 244, 240]),
+        eye: [52, 84, 150],
+        mouth: [150, 84, 80],
+        shoes: [58, 44, 34],
+        ribs: None,
+    };
     match kind {
-        EntityKind::Player => humanoid([214, 170, 138], [58, 112, 176], [46, 52, 92], Motion::SwingA, 1.0),
-        EntityKind::Zombie => humanoid([98, 148, 92], [48, 118, 124], [60, 62, 112], Motion::Reach, 1.0),
-        EntityKind::Skeleton => humanoid([204, 204, 196], [186, 186, 178], [176, 176, 168], Motion::SwingA, 0.62),
+        EntityKind::Player => humanoid([214, 170, 138], [58, 112, 176], [46, 52, 92], Motion::SwingA, 1.0, living),
+        // The dead have no shine in the eye, and what hair they had is going.
+        EntityKind::Zombie => {
+            let dead = Features {
+                hair: None,
+                white: None,
+                eye: [18, 26, 18],
+                mouth: [44, 66, 44],
+                shoes: [44, 48, 62],
+                ribs: None,
+            };
+            let mut v = humanoid([98, 148, 92], [48, 118, 124], [60, 62, 112], Motion::Reach, 1.0, dead);
+            // Rags: a tear in the shirt, with the skin showing through.
+            v.push(p([0.0, 0.7, 0.0], [0.04, 0.12, 0.13], [0.2, 0.3, 0.138], [86, 132, 82], Motion::Still));
+            v
+        }
+        EntityKind::Skeleton => {
+            let bone = Features {
+                hair: None,
+                white: None,
+                eye: [20, 20, 22],
+                mouth: [60, 60, 58],
+                shoes: [176, 176, 168],
+                ribs: Some([92, 92, 88]),
+            };
+            humanoid([204, 204, 196], [186, 186, 178], [176, 176, 168], Motion::SwingA, 0.62, bone)
+        }
         EntityKind::Sheep => {
-            let mut v = quadruped([234, 232, 226], [206, 186, 164], [190, 172, 152], 1.05);
-            // Its fleece stands proud of its legs.
+            let mut v = quadruped([234, 232, 226], [96, 82, 72], [84, 72, 64], 1.05);
+            // Its fleece stands proud of its legs, and sits in a tuft on its head.
             v[0].min = [-0.36, -0.04, -0.5];
             v[0].max = [0.36, 0.48, 0.5];
+            v.push(p([0.0, 0.62, 0.42], [-0.17, 0.16, 0.0], [0.17, 0.27, 0.22], [234, 232, 226], Motion::Head));
             v
         }
         EntityKind::Pig => {
             let mut v = quadruped([236, 164, 164], [240, 172, 172], [214, 142, 142], 1.0);
-            v.push(p([0.0, 0.62, 0.42], [-0.09, -0.1, 0.33], [0.09, 0.03, 0.4], [214, 130, 136], Motion::Head));
+            let snout = [0.0, 0.62, 0.42];
+            v.push(p(snout, [-0.09, -0.1, 0.33], [0.09, 0.03, 0.4], [214, 130, 136], Motion::Head));
+            for x in [-0.06f32, 0.025] {
+                v.push(p(snout, [x, -0.06, 0.4], [x + 0.035, -0.02, 0.405], [150, 84, 92], Motion::Head));
+            }
             v
         }
-        EntityKind::Chicken => vec![
-            p([0.0, 0.28, 0.0], [-0.14, 0.0, -0.2], [0.14, 0.28, 0.2], [240, 238, 232], Motion::Still),
-            p([0.0, 0.5, 0.16], [-0.09, 0.0, -0.08], [0.09, 0.2, 0.08], [244, 242, 236], Motion::Head),
-            p([0.0, 0.5, 0.16], [-0.05, 0.05, 0.08], [0.05, 0.11, 0.17], [236, 178, 54], Motion::Head),
-            p([0.0, 0.5, 0.16], [-0.03, 0.2, -0.04], [0.03, 0.27, 0.05], [204, 42, 40], Motion::Head),
-            p([-0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], [226, 170, 52], Motion::SwingA),
-            p([0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], [226, 170, 52], Motion::SwingB),
-        ],
+        EntityKind::Chicken => {
+            let (white, yellow, head) = ([240, 238, 232], [226, 170, 52], [0.0, 0.5, 0.16]);
+            let mut v = vec![
+                p([0.0, 0.28, 0.0], [-0.14, 0.0, -0.2], [0.14, 0.28, 0.2], white, Motion::Still),
+                p(head, [-0.09, 0.0, -0.08], [0.09, 0.2, 0.08], [244, 242, 236], Motion::Head),
+                p(head, [-0.05, 0.05, 0.08], [0.05, 0.11, 0.17], [236, 178, 54], Motion::Head),
+                p(head, [-0.03, 0.2, -0.04], [0.03, 0.27, 0.05], [204, 42, 40], Motion::Head),
+                p(head, [-0.03, -0.03, 0.08], [0.03, 0.05, 0.12], [204, 42, 40], Motion::Head),
+                // Tail feathers, standing up behind.
+                p([0.0, 0.5, -0.2], [-0.08, -0.06, -0.08], [0.08, 0.14, 0.0], [226, 224, 216], Motion::Still),
+                p([-0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], yellow, Motion::SwingA),
+                p([0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], yellow, Motion::SwingB),
+                p([-0.08, 0.28, 0.0], [-0.06, -0.28, -0.03], [0.06, -0.25, 0.09], yellow, Motion::SwingA),
+                p([0.08, 0.28, 0.0], [-0.06, -0.28, -0.03], [0.06, -0.25, 0.09], yellow, Motion::SwingB),
+            ];
+            for side in [-1.0f32, 1.0] {
+                // A wing folded along each side, and an eye.
+                let (x0, x1) = if side < 0.0 { (-0.17, -0.14) } else { (0.14, 0.17) };
+                v.push(p([0.0, 0.28, 0.0], [x0, 0.06, -0.14], [x1, 0.24, 0.12], [222, 220, 212], Motion::Still));
+                let (x0, x1) = if side < 0.0 { (-0.095, -0.085) } else { (0.085, 0.095) };
+                v.push(p(head, [x0, 0.11, 0.02], [x1, 0.15, 0.06], [20, 20, 22], Motion::Head));
+            }
+            v
+        }
         EntityKind::Gloomcrawler => {
             let (shell, dark, eye) = ([38, 46, 66], [22, 24, 32], [255, 178, 52]);
             let mut v = vec![
-                // A broad shell low over the ground, its head before it, and two eyes that shine.
+                // A broad shell low over the ground, ridged along its back, its head before it, and
+                // two eyes that shine.
                 p([0.0, 0.2, 0.0], [-0.42, 0.0, -0.42], [0.42, 0.32, 0.4], shell, Motion::Still),
                 p([0.0, 0.3, 0.0], [-0.3, 0.0, -0.3], [0.3, 0.08, 0.28], [52, 64, 92], Motion::Still),
                 p([0.0, 0.26, 0.4], [-0.2, -0.1, 0.0], [0.2, 0.12, 0.22], dark, Motion::Head),
                 glowing(p([0.0, 0.26, 0.4], [-0.15, 0.0, 0.2], [-0.06, 0.06, 0.24], eye, Motion::Head)),
                 glowing(p([0.0, 0.26, 0.4], [0.06, 0.0, 0.2], [0.15, 0.06, 0.24], eye, Motion::Head)),
             ];
+            for z in [-0.28f32, -0.1, 0.08] {
+                v.push(p([0.0, 0.38, 0.0], [-0.22, 0.0, z], [0.22, 0.035, z + 0.07], [70, 84, 116], Motion::Still));
+            }
+            // Jaws that close from the sides.
+            for x in [-0.14f32, 0.08] {
+                v.push(p([0.0, 0.26, 0.4], [x, -0.1, 0.2], [x + 0.06, -0.04, 0.32], [60, 62, 74], Motion::Head));
+            }
             // Three legs a side, reaching out and down, each pair stepping against the next.
             for (i, z) in [-0.26f32, 0.0, 0.26].into_iter().enumerate() {
                 let (a, b) =
@@ -393,18 +549,78 @@ fn parts_of(kind: EntityKind) -> Vec<Part> {
         }
         EntityKind::Lurker => {
             let (skin, dim) = ([200, 196, 188], [150, 146, 140]);
-            vec![
-                // A long head with no eyes, hung forward.
-                p([0.0, 1.62, 0.1], [-0.19, -0.04, -0.18], [0.19, 0.38, 0.24], skin, Motion::Head),
+            let head = [0.0, 1.62, 0.1];
+            let mut v = vec![
+                // A long head with no eyes, hung forward, and a mouth too wide for it.
+                p(head, [-0.19, -0.04, -0.18], [0.19, 0.38, 0.24], skin, Motion::Head),
+                p(head, [-0.15, 0.02, 0.24], [0.15, 0.07, 0.25], [48, 30, 34], Motion::Head),
                 p([0.0, 0.88, 0.0], [-0.19, 0.0, -0.1], [0.19, 0.78, 0.1], dim, Motion::Still),
                 p([-0.1, 0.88, 0.0], [-0.07, -0.88, -0.07], [0.07, 0.0, 0.07], dim, Motion::SwingA),
                 p([0.1, 0.88, 0.0], [-0.07, -0.88, -0.07], [0.07, 0.0, 0.07], dim, Motion::SwingB),
-                // Arms that reach past its knees.
+                // Arms that reach past its knees, ending in long hands.
                 p([-0.27, 1.6, 0.0], [-0.06, -1.05, -0.06], [0.06, 0.04, 0.06], skin, Motion::SwingB),
                 p([0.27, 1.6, 0.0], [-0.06, -1.05, -0.06], [0.06, 0.04, 0.06], skin, Motion::SwingA),
-            ]
+                p([-0.27, 1.6, 0.0], [-0.075, -1.2, -0.03], [0.075, -1.03, 0.05], [176, 172, 164], Motion::SwingB),
+                p([0.27, 1.6, 0.0], [-0.075, -1.2, -0.03], [0.075, -1.03, 0.05], [176, 172, 164], Motion::SwingA),
+            ];
+            // Ribs showing through its sides, and the knobs of its spine.
+            for k in 0..4 {
+                let y = 0.3 + k as f32 * 0.11;
+                v.push(p([0.0, 0.88, 0.0], [-0.16, y, 0.1], [0.16, y + 0.04, 0.108], [120, 116, 112], Motion::Still));
+                v.push(p([0.0, 0.88, 0.0], [-0.03, y, -0.13], [0.03, y + 0.06, -0.1], skin, Motion::Still));
+            }
+            v
         }
         _ => Vec::new(),
+    }
+}
+
+/// A box with its edges and corners taken off: six faces drawn in from their edges, a strip along
+/// each edge between them, and a triangle at each corner, each lit by the way it faces. Bodies are
+/// not made of planks.
+fn soft_box(out: &mut Vec<EntityVertex>, m: Mat4, min: Vec3, max: Vec3, color: [u8; 4], light: Light) {
+    let size = max - min;
+    let r = (size.min_element() * 0.28).min(0.07);
+    if r < 0.01 {
+        colored_box(out, m, min, max, color, light);
+        return;
+    }
+    let (centre, half) = ((min + max) * 0.5, size * 0.5);
+    // The corner at `s` (each part 1 or -1), pulled back from every side but the one facing `keep`.
+    let at = |s: Vec3, keep: Vec3| centre + s * (half - (Vec3::ONE - keep) * r);
+    let mut face = |points: &[Vec3], outward: Vec3| {
+        let normal = m.transform_vector3(outward).normalize_or_zero();
+        let v = |p: Vec3| vertex(m.transform_point3(p), [0.0, 0.0], NO_TEXTURE, color, normal, false, light);
+        // Wound to face outward, whichever way round the points came.
+        let flip = (points[1] - points[0]).cross(points[2] - points[0]).dot(outward) < 0.0;
+        for tri in [[0, 1, 2], [0, 2, 3]] {
+            if tri.iter().any(|&k| k >= points.len()) {
+                continue;
+            }
+            let [a, b, c] = if flip { [tri[0], tri[2], tri[1]] } else { tri };
+            out.extend_from_slice(&[v(points[a]), v(points[b]), v(points[c])]);
+        }
+    };
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    for (i, &a) in axes.iter().enumerate() {
+        let (b, c) = (axes[(i + 1) % 3], axes[(i + 2) % 3]);
+        for sa in [-1.0f32, 1.0] {
+            // A face, across the two other ways.
+            face(&[at(a * sa - b - c, a), at(a * sa + b - c, a), at(a * sa + b + c, a), at(a * sa - b + c, a)], a * sa);
+            // The strip between this face and the next way round, along the third.
+            for sb in [-1.0f32, 1.0] {
+                let (lo, hi) = (a * sa + b * sb - c, a * sa + b * sb + c);
+                face(&[at(lo, a), at(hi, a), at(hi, b), at(lo, b)], a * sa + b * sb);
+            }
+        }
+    }
+    for sx in [-1.0f32, 1.0] {
+        for sy in [-1.0f32, 1.0] {
+            for sz in [-1.0f32, 1.0] {
+                let s = Vec3::new(sx, sy, sz);
+                face(&[at(s, Vec3::X), at(s, Vec3::Y), at(s, Vec3::Z)], s);
+            }
+        }
     }
 }
 
@@ -436,7 +652,7 @@ pub fn creature(
         let m = base * Mat4::from_translation(Vec3::from_array(part.pivot)) * rot;
         let c = part.color;
         let lit = if part.glow { Light { sky: 255, block: 255 } } else { light };
-        colored_box(out, m, Vec3::from_array(part.min), Vec3::from_array(part.max), [c[0], c[1], c[2], 255], lit);
+        soft_box(out, m, Vec3::from_array(part.min), Vec3::from_array(part.max), [c[0], c[1], c[2], 255], lit);
     }
 }
 

@@ -14,7 +14,9 @@ use arena::{Arena, Span};
 use far::{FarTerrain, FarVertex};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use std::sync::Arc;
-use textures::{TILE, all_icons, crack_tiles, material, material_chain, mip_chain, paint, pixelate, plain_material};
+use textures::{
+    FINE, all_icons, crack_tiles, enlarge, material, material_chain, mip_chain, paint, pixelate, plain_material, refine,
+};
 use ui::{Atlas, UiBatch, UiVertex};
 use wgpu::util::DeviceExt;
 use zenith_content::Registry;
@@ -371,7 +373,7 @@ struct Skin {
 fn tile_texture_descriptor(layers: u32, mips: u32) -> wgpu::TextureDescriptor<'static> {
     wgpu::TextureDescriptor {
         label: Some("tiles"),
-        size: wgpu::Extent3d { width: TILE as u32, height: TILE as u32, depth_or_array_layers: layers },
+        size: wgpu::Extent3d { width: FINE as u32, height: FINE as u32, depth_or_array_layers: layers },
         mip_level_count: mips,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -392,11 +394,11 @@ fn paint_skin(device: &wgpu::Device, queue: &wgpu::Queue, parts: &SkinParts, reg
     let room = (device.limits().max_texture_array_layers as usize).saturating_sub(cracks.len());
     let crack_layer = painted.len().min(room) as u32;
     let tile_count = crack_layer + cracks.len() as u32;
-    let mips = (TILE as f32).log2() as u32 + 1;
+    let mips = (FINE as f32).log2() as u32 + 1;
     let tile_texture = device.create_texture(&tile_texture_descriptor(tile_count, mips));
     let write_tile = |layer: u32, chain: &[Vec<[u8; 4]>]| {
         for (level, px) in chain.iter().enumerate() {
-            let size = (TILE >> level) as u32;
+            let size = (FINE >> level) as u32;
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &tile_texture,
@@ -410,11 +412,19 @@ fn paint_skin(device: &wgpu::Device, queue: &wgpu::Queue, parts: &SkinParts, reg
             );
         }
     };
-    for (i, (px, tex)) in painted.iter().zip(reg.tiles()).take(crack_layer as usize).enumerate() {
+    // The paintings at the size the graphics card holds: the classic look's pixels as they are,
+    // the modern look's drawn out fine.
+    let fine: Vec<textures::Pixels> = painted
+        .iter()
+        .zip(reg.tiles())
+        .take(crack_layer as usize)
+        .map(|(px, tex)| if classic { enlarge(px) } else { refine(px, tex.pattern, tex.seed) })
+        .collect();
+    for (i, (px, tex)) in fine.iter().zip(reg.tiles()).enumerate() {
         write_tile(i as u32, &mip_chain(px, tex.pattern));
     }
     for (i, px) in cracks.iter().enumerate() {
-        write_tile(crack_layer + i as u32, &mip_chain(px, zenith_content::Pattern::Glass));
+        write_tile(crack_layer + i as u32, &mip_chain(&enlarge(px), zenith_content::Pattern::Glass));
     }
     let tile_view = tile_texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -430,7 +440,7 @@ fn paint_skin(device: &wgpu::Device, queue: &wgpu::Queue, parts: &SkinParts, reg
     });
     let write_material = |layer: u32, chain: &[Vec<[u8; 4]>]| {
         for (level, px) in chain.iter().enumerate() {
-            let size = (TILE >> level) as u32;
+            let size = (FINE >> level) as u32;
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &material_texture,
@@ -444,7 +454,7 @@ fn paint_skin(device: &wgpu::Device, queue: &wgpu::Queue, parts: &SkinParts, reg
             );
         }
     };
-    for (i, (px, tex)) in painted.iter().zip(reg.tiles()).take(crack_layer as usize).enumerate() {
+    for (i, (px, tex)) in fine.iter().zip(reg.tiles()).enumerate() {
         write_material(i as u32, &material_chain(&material(px, tex)));
     }
     let plain = material_chain(&plain_material());

@@ -49,6 +49,8 @@ untested**.
 **F6** opens the debug options: the info text, a graph of frame times, chunk borders, hitboxes, fog, clouds and full
 bright, and buttons to set the time, the weather and the game mode or go back to spawn.
 
+Frames are not held to the display's rate: **Frame cap** in the pause menu turns that on, for a quieter graphics card.
+
 Saves and settings are in your user data folder (on Windows, `%APPDATA%\Zenith`), or wherever `ZENITH_HOME` points.
 
 ## What's in it
@@ -68,6 +70,9 @@ Saves and settings are in your user data folder (on Windows, `%APPDATA%\Zenith`)
   front, and experience levels from what you defeat and from the coal, ember and crystal you dig.
 - **Travel**: boats on water, and rails with carts that roll downhill, round corners and up slopes, and booster rails to
   speed them along.
+- **Water, fire and fish**: a copper bucket scoops up a spring of water or lava and pours it out again. A fishing rod
+  casts a float, and a pull while something bites brings in a perch or a trout. A tinderbox lights fire, which burns
+  through wood, wool and leaves and dies on bare ground, and a campfire cooks what is laid on it.
 - **Moving parts**: water and lava that flow, sand that falls, TNT, and signal wires with levers, lamps and inverters.
 - **Multiplayer**: a dedicated server, and single player is the same server on a thread.
 - **Mods**: content packs that add blocks, items and recipes, found and installed from the **Mods** screen, from web
@@ -140,6 +145,19 @@ sneak, open the inventory and pause. It has been played in the Android emulator,
 ## Mods
 
 The **Mods** screen on the title screen browses sources, installs, updates, and turns mods on and off.
+
+A mod written for Minecraft cannot run here: it is Java code for another game. What such a mod *declares* can be
+converted, from its `.jar` or a folder of them:
+
+```bash
+cargo run --release -p zenith-ctl -- mods convert path/to/mod.jar
+```
+
+Its plain blocks, plants, slabs and stairs become blocks here, coloured from their own pictures; its items become
+materials, tools or food by their names; and its recipes come along where everything they need exists here. Nothing its
+code does comes with it, so a mod that is all code, such as one that changes how the world is drawn, converts to nothing,
+and the report says so. Zenith already draws far terrain to the horizon by itself. The converter has been tried on jars
+made for its tests, not yet on a published mod.
 [docs/MODS.md](docs/MODS.md) covers playing with them, publishing them, and running them on a server.
 
 ### For Minecraft: mc-modkit

@@ -8,6 +8,10 @@ use zenith_core::Rng;
 use zenith_core::noise::Fbm;
 
 pub const TILE: usize = 32;
+/// The side of a tile as the graphics card holds it: each painted tile drawn out finer, its edges
+/// kept and its surfaces given a grain. Eight times the painting on a desktop, four on a phone,
+/// which has a fraction of the memory.
+pub const FINE: usize = if cfg!(target_os = "android") { 128 } else { 256 };
 pub const CRACK_STAGES: usize = 10;
 
 /// One tile: `TILE` x `TILE` RGBA. The alpha of an opaque block's tile says how much of the biome's
@@ -947,9 +951,12 @@ fn near(p: [u8; 4], c: [u8; 3]) -> f64 {
 /// in a plain (not sRGB) texture: the facing's lean across and down the tile, roughness, metalness.
 /// The classic look's big pixels give big, blocky bumps.
 pub fn material(px: &Pixels, t: &Tex) -> Pixels {
+    let n = side(px);
     let (strength, rough, metal) = surface(t);
+    // A finer picture changes less from one texel to the next for the same slope.
+    let strength = strength * (n / TILE).max(1) as f64 * if n > TILE { 0.6 } else { 1.0 };
     let height = |x: usize, y: usize| {
-        let p = px[(y % TILE) * TILE + x % TILE];
+        let p = px[(y % n) * n + x % n];
         if p[3] == 0 && alpha_means_holes(t.pattern) { 0.0 } else { luminance(p) }
     };
     // A vein of ore is a jewel, a seam of coal, or bright metal, by its colour.
@@ -960,31 +967,35 @@ pub fn material(px: &Pixels, t: &Tex) -> Pixels {
     } else {
         (0.3, 0.85)
     };
-    each(|x, y| {
-        let (left, right) = (height(x + TILE - 1, y), height(x + 1, y));
-        let (up, down) = (height(x, y + TILE - 1), height(x, y + 1));
-        let (nx, ny) = (-(right - left) * 0.5 * strength, -(down - up) * 0.5 * strength);
-        let length = (nx * nx + ny * ny + 1.0).sqrt();
-        let p = px[y * TILE + x];
-        let (r, m) = match t.pattern {
-            Pattern::Ore if near(p, t.b) < near(p, t.a) => vein,
-            Pattern::Rail | Pattern::RailCurve if near(p, t.a) < near(p, t.b) => (0.35, 1.0),
-            _ => (rough, metal),
-        };
-        let encode = |v: f64| ((v / length) * 127.5 + 127.5).round().clamp(0.0, 255.0) as u8;
-        [encode(nx), encode(ny), (r * 255.0) as u8, (m * 255.0) as u8]
-    })
+    let mut out = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            let (left, right) = (height(x + n - 1, y), height(x + 1, y));
+            let (up, down) = (height(x, y + n - 1), height(x, y + 1));
+            let (nx, ny) = (-(right - left) * 0.5 * strength, -(down - up) * 0.5 * strength);
+            let length = (nx * nx + ny * ny + 1.0).sqrt();
+            let p = px[y * n + x];
+            let (r, m) = match t.pattern {
+                Pattern::Ore if near(p, t.b) < near(p, t.a) => vein,
+                Pattern::Rail | Pattern::RailCurve if near(p, t.a) < near(p, t.b) => (0.35, 1.0),
+                _ => (rough, metal),
+            };
+            let encode = |v: f64| ((v / length) * 127.5 + 127.5).round().clamp(0.0, 255.0) as u8;
+            out.push([encode(nx), encode(ny), (r * 255.0) as u8, (m * 255.0) as u8]);
+        }
+    }
+    out
 }
 
 /// A material with no bumps: for cracks, and anything without a picture of its own.
 pub fn plain_material() -> Pixels {
-    vec![[128, 128, 200, 0]; TILE * TILE]
+    vec![[128, 128, 200, 0]; FINE * FINE]
 }
 
 /// Halves a material down to one texel, each level the average of the one above.
 pub fn material_chain(px: &Pixels) -> Vec<Pixels> {
     let mut chain = vec![px.clone()];
-    let mut size = TILE;
+    let mut size = side(px);
     while size > 1 {
         let (prev, half) = (chain.last().cloned().unwrap_or_default(), size / 2);
         let mut next = Vec::with_capacity(half * half);
@@ -1004,6 +1015,129 @@ pub fn material_chain(px: &Pixels) -> Vec<Pixels> {
         size = half;
     }
     chain
+}
+
+/// How many texels across a square picture is.
+fn side(px: &Pixels) -> usize {
+    (px.len() as f64).sqrt().round() as usize
+}
+
+/// A painted tile at the size the graphics card holds, each of its pixels a square of texels: the
+/// classic look, whose pixels are the point.
+pub fn enlarge(px: &Pixels) -> Pixels {
+    let scale = FINE / TILE;
+    (0..FINE * FINE).map(|i| px[(i / FINE / scale) * TILE + (i % FINE) / scale]).collect()
+}
+
+/// How much grain a surface has when looked at closely, and how hard the lines in its picture
+/// stay: rock is gritty and wood has a little tooth, glass and lamplight are clean, and anything
+/// drawn in lines keeps them sharp.
+fn fineness(p: Pattern) -> (f64, f64) {
+    match p {
+        Pattern::Glass | Pattern::Ice | Pattern::Water | Pattern::Lava | Pattern::Lamp | Pattern::Flame => (0.012, 2.0),
+        Pattern::Torch
+        | Pattern::Ladder
+        | Pattern::Wire
+        | Pattern::Lever
+        | Pattern::Inverter
+        | Pattern::Rail
+        | Pattern::RailCurve
+        | Pattern::Tnt
+        | Pattern::Door
+        | Pattern::Trapdoor => (0.03, 4.0),
+        Pattern::Planks
+        | Pattern::LogSide
+        | Pattern::LogTop
+        | Pattern::BenchTop
+        | Pattern::BenchSide
+        | Pattern::ChestFront
+        | Pattern::ChestSide
+        | Pattern::ChestTop => (0.05, 3.0),
+        Pattern::Leaves
+        | Pattern::Tuft
+        | Pattern::Flower
+        | Pattern::Mushroom
+        | Pattern::Reed
+        | Pattern::Sapling
+        | Pattern::DeadBush
+        | Pattern::Crop => (0.06, 2.5),
+        Pattern::Wool | Pattern::Quilt | Pattern::Pillow | Pattern::Snow => (0.05, 1.6),
+        Pattern::Bricks | Pattern::Blocks => (0.07, 3.0),
+        _ => (0.085, 2.0),
+    }
+}
+
+/// A number from -1 to 1 for a point, the same every time, that repeats every `period` cells.
+fn lattice(x: usize, y: usize, period: usize, seed: u32) -> f64 {
+    let (x, y) = ((x % period) as u32, (y % period) as u32);
+    let mut h = x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA6B) ^ seed.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    f64::from(h & 0xFFFF) / 32767.5 - 1.0
+}
+
+/// Smooth noise over a tile, from -1 to 1, in cells `cell` texels wide, that tiles.
+fn tiled_noise(x: usize, y: usize, cell: usize, seed: u32) -> f64 {
+    let period = FINE / cell;
+    let (cx, cy) = (x / cell, y / cell);
+    let ease = |t: f64| t * t * (3.0 - 2.0 * t);
+    let (fx, fy) = (ease((x % cell) as f64 / cell as f64), ease((y % cell) as f64 / cell as f64));
+    let at = |dx: usize, dy: usize| lattice(cx + dx, cy + dy, period, seed);
+    let (top, bottom) = (at(0, 0) + (at(1, 0) - at(0, 0)) * fx, at(0, 1) + (at(1, 1) - at(0, 1)) * fx);
+    top + (bottom - top) * fy
+}
+
+/// A painted tile drawn out to the size the graphics card holds, for the modern look. Where the
+/// painting has an edge, the fine picture has it too, a clean line and not a staircase; where it
+/// is all one surface, the colours run into each other; and over everything goes the grain of the
+/// stuff it is, which the painting was too coarse to hold, and which the light then catches.
+pub fn refine(px: &Pixels, pattern: Pattern, seed: u32) -> Pixels {
+    let scale = FINE / TILE;
+    let holes = alpha_means_holes(pattern);
+    let (grain, crisp) = fineness(pattern);
+    // Blocks repeat across a wall; plants and the like end at their own edges.
+    let at = |x: isize, y: isize| -> [f64; 4] {
+        let wrap = |v: isize| if holes { v.clamp(0, TILE as isize - 1) } else { v.rem_euclid(TILE as isize) } as usize;
+        let p = px[wrap(y) * TILE + wrap(x)];
+        let a = f64::from(p[3]) / 255.0;
+        // The colour under a hole is nothing: it must not darken what is beside it.
+        let w = if holes { a } else { 1.0 };
+        [f64::from(p[0]) * w, f64::from(p[1]) * w, f64::from(p[2]) * w, a]
+    };
+    let sharpen = |t: f64| {
+        let t = ((t - 0.5) * crisp + 0.5).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let mut out = Vec::with_capacity(FINE * FINE);
+    for y in 0..FINE {
+        for x in 0..FINE {
+            let (u, v) = ((x as f64 + 0.5) / scale as f64 - 0.5, (y as f64 + 0.5) / scale as f64 - 0.5);
+            let (x0, y0) = (u.floor(), v.floor());
+            let (fx, fy) = (sharpen(u - x0), sharpen(v - y0));
+            let (x0, y0) = (x0 as isize, y0 as isize);
+            let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+            let mut p = [0.0; 4];
+            for i in 0..4 {
+                let (top, bottom) = (a[i] + (b[i] - a[i]) * fx, c[i] + (d[i] - c[i]) * fx);
+                p[i] = top + (bottom - top) * fy;
+            }
+            let alpha = p[3];
+            if holes && alpha < 0.5 {
+                out.push([0, 0, 0, 0]);
+                continue;
+            }
+            // Grain at three sizes, the finest the strongest.
+            let g = tiled_noise(x, y, 2, seed) * 0.5
+                + tiled_noise(x, y, 4, seed + 7) * 0.3
+                + tiled_noise(x, y, 8, seed + 13) * 0.2;
+            let tone = (1.0 + g * grain) / if holes { alpha.max(0.5) } else { 1.0 };
+            let channel = |v: f64| (v * tone).round().clamp(0.0, 255.0) as u8;
+            let a = if holes { 255 } else { (alpha * 255.0).round() as u8 };
+            out.push([channel(p[0]), channel(p[1]), channel(p[2]), a]);
+        }
+    }
+    out
 }
 
 /// How the mip chain of a tile should treat its alpha.
@@ -1183,33 +1317,34 @@ pub fn crack_tiles() -> Vec<Pixels> {
 /// A tile with its mip levels, as one run of bytes per level.
 pub fn mip_chain(px: &Pixels, pattern: Pattern) -> Vec<Vec<[u8; 4]>> {
     let holes = alpha_means_holes(pattern);
+    let n = side(px);
     // Fill the colour under transparent pixels from what is around them, or mips darken the edges
     // of leaves and plants with the black of their holes.
     let mut base = px.clone();
     if holes {
         for _ in 0..4 {
             let copy = base.clone();
-            for y in 0..TILE {
-                for x in 0..TILE {
-                    if copy[y * TILE + x][3] != 0 || base[y * TILE + x][0..3] != [0, 0, 0] {
+            for y in 0..n {
+                for x in 0..n {
+                    if copy[y * n + x][3] != 0 || base[y * n + x][0..3] != [0, 0, 0] {
                         continue;
                     }
-                    let (mut sum, mut n) = ([0u32; 3], 0u32);
+                    let (mut sum, mut count) = ([0u32; 3], 0u32);
                     for (dx, dy) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
                         let (nx, ny) = (
-                            ((x as isize + dx).rem_euclid(TILE as isize)) as usize,
-                            ((y as isize + dy).rem_euclid(TILE as isize)) as usize,
+                            ((x as isize + dx).rem_euclid(n as isize)) as usize,
+                            ((y as isize + dy).rem_euclid(n as isize)) as usize,
                         );
-                        let o = copy[ny * TILE + nx];
+                        let o = copy[ny * n + nx];
                         if o[3] != 0 || o[0..3] != [0, 0, 0] {
                             for c in 0..3 {
                                 sum[c] += o[c] as u32;
                             }
-                            n += 1;
+                            count += 1;
                         }
                     }
-                    if let [Some(r), Some(g), Some(b)] = sum.map(|c| c.checked_div(n)) {
-                        let p = &mut base[y * TILE + x];
+                    if let [Some(r), Some(g), Some(b)] = sum.map(|c| c.checked_div(count)) {
+                        let p = &mut base[y * n + x];
                         p[0] = r as u8;
                         p[1] = g as u8;
                         p[2] = b as u8;
@@ -1219,7 +1354,7 @@ pub fn mip_chain(px: &Pixels, pattern: Pattern) -> Vec<Vec<[u8; 4]>> {
         }
     }
     let mut chain = vec![base];
-    let mut size = TILE;
+    let mut size = n;
     while size > 1 {
         let last = chain.last().map_or(&[][..], |v| v.as_slice());
         let half = size / 2;
