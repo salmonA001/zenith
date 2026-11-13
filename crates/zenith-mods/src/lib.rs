@@ -6,8 +6,13 @@
 //! where to look for more and which mods are turned off.
 //!
 //! Packs are data. Nothing here runs anything that came with a mod.
+//!
+//! A Minecraft mod's jar can be converted into a pack, as far as its data goes: see `convert`.
 mod catalogue;
+mod convert;
 mod library;
+
+pub use convert::{Converted, Report, convert_bytes, convert_jar};
 
 pub use catalogue::{CATALOGUE_FILE, Catalogue, CatalogueEntry, Listing, Source};
 pub use library::{EntryState, Installed, Library, Manifest, default_home};

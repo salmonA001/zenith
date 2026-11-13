@@ -16,6 +16,8 @@ USAGE:
   zenith-ctl mods update              install every newer version the sources have
   zenith-ctl mods on ID | off ID      turn a mod on or off
   zenith-ctl mods remove ID           uninstall a mod
+  zenith-ctl mods convert PATH        make a mod out of a Minecraft mod's .jar, or every .jar in a
+                                      folder: its blocks, items and recipes, not its code
 
 The library is the mods folder in ZENITH_HOME, or the user's Zenith data folder.
 ";
@@ -153,6 +155,41 @@ pub fn run(args: &[String]) -> Result<Value, String> {
             let id = arg(1, "a mod id")?;
             library.remove(&id)?;
             json!({"removed": id})
+        }
+        "convert" => {
+            let path = std::path::PathBuf::from(arg(1, "a .jar file or a folder of them")?);
+            let jars: Vec<std::path::PathBuf> = if path.is_dir() {
+                let entries = std::fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let mut jars: Vec<_> =
+                    entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jar")).collect();
+                jars.sort();
+                jars
+            } else {
+                vec![path]
+            };
+            if jars.is_empty() {
+                return Err("there are no .jar files there".into());
+            }
+            let mut done = Vec::new();
+            for jar in jars {
+                let file = jar.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                done.push(match zenith_mods::convert_jar(&jar) {
+                    // A mod with nothing to convert is reported, and adds nothing to the library.
+                    Ok(c) => {
+                        let installed = c.report.blocks + c.report.items > 0;
+                        let error = if installed { library.add_converted(&c).err() } else { None };
+                        json!({
+                            "file": file, "id": c.manifest.id, "name": c.manifest.name,
+                            "installed": installed && error.is_none(), "error": error,
+                            "blocks": c.report.blocks, "items": c.report.items, "recipes": c.report.recipes,
+                            "blocks_left_out": c.report.blocks_left, "recipes_left_out": c.report.recipes_left,
+                            "notes": c.report.notes,
+                        })
+                    }
+                    Err(e) => json!({"file": file, "installed": false, "error": e}),
+                });
+            }
+            json!(done)
         }
         "help" | "--help" | "-h" => json!(USAGE),
         other => return Err(format!("no mods command called {other}\n\n{USAGE}")),

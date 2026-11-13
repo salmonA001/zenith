@@ -958,6 +958,26 @@ impl App {
         Ok(())
     }
 
+    /// Whether frames should not wait for the display: asked for at launch, or chosen in the menu.
+    fn wants_uncapped(&self) -> bool {
+        self.launch.uncapped
+            || self.running.as_ref().is_some_and(|r| match &r.mode {
+                Mode::Playing(g) => !g.options.frame_cap,
+                Mode::Title(_) => !r.options.frame_cap,
+            })
+    }
+
+    /// Sets the window to wait for the display or not, when that choice has changed.
+    fn sync_frame_cap(&mut self) {
+        let mode = if self.wants_uncapped() { wgpu::PresentMode::AutoNoVsync } else { wgpu::PresentMode::AutoVsync };
+        if let (Some(screen), Some(running)) = (&mut self.screen, &self.running)
+            && screen.config.present_mode != mode
+        {
+            screen.config.present_mode = mode;
+            screen.surface.configure(&running.renderer.device, &screen.config);
+        }
+    }
+
     /// Shows Android's on-screen keyboard while someone is typing, and only then. A tap on a field
     /// shows it again, in case Android put it away by itself.
     #[cfg(target_os = "android")]
@@ -1087,6 +1107,7 @@ impl ApplicationHandler for App {
                 self.sync_cursor();
             }
             WindowEvent::RedrawRequested => {
+                self.sync_frame_cap();
                 if !self.present() {
                     event_loop.exit();
                 }

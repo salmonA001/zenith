@@ -535,7 +535,7 @@ fn pause_screen(ui: &mut UiBatch, g: &mut Game, m: Mouse) {
     let (w, h) = (ui.width, ui.height);
     ui.rect(0.0, 0.0, w, h, [4, 5, 10, 120]);
     let (bw, x) = (170.0, ((w - 170.0) / 2.0).floor());
-    let mut y = (h / 2.0 - 70.0).floor();
+    let mut y = (h / 2.0 - 81.0).floor();
     ui.text_centered(w / 2.0, y - 18.0, "Game paused", 2.0, WHITE);
     if button(ui, m, x, y, bw, 18.0, "Back to the game") {
         g.overlay = Overlay::None;
@@ -585,6 +585,11 @@ fn pause_screen(ui: &mut UiBatch, g: &mut Game, m: Mouse) {
     }
     if button(ui, m, x + bw - 18.0, y, 18.0, 18.0, "+") {
         g.options.fov = (g.options.fov + 5.0).min(120.0);
+    }
+    y += 22.0;
+    let cap = if g.options.frame_cap { "Frame cap: display rate" } else { "Frame cap: off" };
+    if button(ui, m, x, y, bw, 18.0, cap) {
+        g.options.frame_cap = !g.options.frame_cap;
     }
     y += 22.0;
     if button(ui, m, x, y, bw, 18.0, "Debug options") {

@@ -181,6 +181,21 @@ impl Library {
     }
 
     /// The packs of every mod that is turned on, in name order.
+    /// Puts a pack converted from a Minecraft mod in the library, in place of any earlier
+    /// conversion of the same mod.
+    pub fn add_converted(&self, converted: &crate::Converted) -> Result<Manifest, String> {
+        let text = serde_json::to_vec_pretty(&converted.pack).map_err(|e| e.to_string())?;
+        if text.len() as u64 > MAX_PACK {
+            return Err(format!("{} converts to a pack larger than a pack may be", converted.manifest.name));
+        }
+        let manifest = Manifest { sha256: zenith_fetch::sha256_hex(&text), ..converted.manifest.clone() };
+        if !valid_id(&manifest.id) {
+            return Err(format!("{} is not a name a mod can have", manifest.id));
+        }
+        write_mod(&self.dir, &manifest, &text)?;
+        Ok(manifest)
+    }
+
     pub fn enabled_packs(&self) -> Result<Vec<Pack>, String> {
         let mut packs = Vec::new();
         for m in self.installed().into_iter().filter(|m| m.enabled) {

@@ -45,6 +45,8 @@ pub struct Options {
     pub ray_tracing: bool,
     pub volume: f32,
     pub last_server: String,
+    /// Whether frames wait for the display. Off, the game draws as fast as the graphics card can.
+    pub frame_cap: bool,
 }
 
 impl Default for Options {
@@ -61,6 +63,8 @@ impl Default for Options {
             ray_tracing: false,
             volume: 0.7,
             last_server: "127.0.0.1".into(),
+            // A phone's battery is better spent elsewhere than on frames its screen never shows.
+            frame_cap: cfg!(target_os = "android"),
         }
     }
 }

@@ -21,7 +21,7 @@ USAGE: zenith [OPTIONS]
   --ray-tracing        shadows and reflections from traced rays (modern look, on Vulkan GPUs that trace)
   --width N --height N window size
   --offscreen          no window: draw only when asked to (for agents and tests)
-  --uncapped           draw as fast as the GPU can, not waiting for the display (for measuring)
+  --uncapped           never wait for the display, whatever the menu says (for measuring)
   --control FILE       answer zenith-ctl, writing how to reach this game to FILE
   --help
 

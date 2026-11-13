@@ -11,6 +11,8 @@ serde.workspace = true
 serde_json.workspace = true
 zenith-content = { path = "../zenith-content" }
 zenith-fetch = { path = "../zenith-fetch" }
+png.workspace = true
+flate2 = "1"
 
 [lints]
 workspace = true
