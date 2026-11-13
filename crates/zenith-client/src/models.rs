@@ -310,6 +310,8 @@ enum Motion {
     SwingB,
     /// Held out in front, as zombies do.
     Reach,
+    /// A tail, flicking from side to side.
+    Wag,
 }
 
 const fn p(pivot: [f32; 3], min: [f32; 3], max: [f32; 3], color: [u8; 3], motion: Motion) -> Part {
@@ -438,7 +440,7 @@ fn quadruped(body: [u8; 3], head: [u8; 3], legs: [u8; 3], width: f32) -> Vec<Par
         let (x0, x1) = if side < 0.0 { (-0.27, -0.19) } else { (0.19, 0.27) };
         v.push(p(neck, [x0, 0.12, 0.04], [x1, 0.22, 0.14], darker(head, 0.85), Motion::Head));
     }
-    v.push(p([0.0, 0.8, -0.45], [-0.04, -0.2, -0.05], [0.04, 0.0, 0.0], darker(body, 0.85), Motion::SwingA));
+    v.push(p([0.0, 0.8, -0.45], [-0.04, -0.2, -0.05], [0.04, 0.0, 0.0], darker(body, 0.85), Motion::Wag));
     v
 }
 
@@ -505,7 +507,7 @@ fn parts_of(kind: EntityKind) -> Vec<Part> {
                 p(head, [-0.03, 0.2, -0.04], [0.03, 0.27, 0.05], [204, 42, 40], Motion::Head),
                 p(head, [-0.03, -0.03, 0.08], [0.03, 0.05, 0.12], [204, 42, 40], Motion::Head),
                 // Tail feathers, standing up behind.
-                p([0.0, 0.5, -0.2], [-0.08, -0.06, -0.08], [0.08, 0.14, 0.0], [226, 224, 216], Motion::Still),
+                p([0.0, 0.5, -0.2], [-0.08, -0.06, -0.08], [0.08, 0.14, 0.0], [226, 224, 216], Motion::Wag),
                 p([-0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], yellow, Motion::SwingA),
                 p([0.08, 0.28, 0.0], [-0.03, -0.28, -0.03], [0.03, 0.0, 0.03], yellow, Motion::SwingB),
                 p([-0.08, 0.28, 0.0], [-0.06, -0.28, -0.03], [0.06, -0.25, 0.09], yellow, Motion::SwingA),
@@ -634,6 +636,7 @@ pub fn creature(
     phase: f32,
     speed: f32,
     scale: f32,
+    time: f32,
     light: Light,
 ) {
     // Models are built facing +z, which is where a yaw of zero looks.
@@ -641,13 +644,21 @@ pub fn creature(
         * Mat4::from_rotation_y(-yaw_turns * std::f32::consts::TAU)
         * Mat4::from_scale(Vec3::splat(scale));
     let swing = phase.sin() * speed.clamp(0.0, 1.0) * 0.75;
+    // Standing still is not standing stock still: it breathes, looks about, and shifts its weight.
+    let rest = 1.0 - speed.clamp(0.0, 1.0);
+    let base = base * Mat4::from_scale(Vec3::new(1.0, 1.0 + (time * 1.7).sin() * 0.012, 1.0));
+    let glance = ((time * 0.43).sin() + (time * 0.17).sin()) * 0.11 * rest;
+    let sway = (time * 1.1).sin() * 0.035 * rest;
     for part in parts_of(kind) {
         let rot = match part.motion {
             Motion::Still => Mat4::IDENTITY,
-            Motion::Head => Mat4::from_rotation_x(pitch_turns * std::f32::consts::TAU),
-            Motion::SwingA => Mat4::from_rotation_x(swing),
-            Motion::SwingB => Mat4::from_rotation_x(-swing),
-            Motion::Reach => Mat4::from_rotation_x(-1.45 + swing * 0.15),
+            Motion::Head => {
+                Mat4::from_rotation_y(glance) * Mat4::from_rotation_x(pitch_turns * std::f32::consts::TAU + sway * 0.5)
+            }
+            Motion::SwingA => Mat4::from_rotation_x(swing + sway),
+            Motion::SwingB => Mat4::from_rotation_x(-swing - sway),
+            Motion::Reach => Mat4::from_rotation_x(-1.45 + swing * 0.15 + sway),
+            Motion::Wag => Mat4::from_rotation_z((time * 5.3).sin() * 0.35) * Mat4::from_rotation_x(0.25),
         };
         let m = base * Mat4::from_translation(Vec3::from_array(part.pivot)) * rot;
         let c = part.color;
@@ -1063,7 +1074,7 @@ mod tests {
             EntityKind::Lurker,
         ] {
             let mut out = Vec::new();
-            creature(&mut out, kind, Vec3::ZERO, 0.0, 0.0, 0.0, 0.0, 1.0, LIT);
+            creature(&mut out, kind, Vec3::ZERO, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, LIT);
             assert!(!out.is_empty(), "{kind:?}");
             let lowest = out.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
             let highest = out.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
@@ -1072,7 +1083,7 @@ mod tests {
             assert!(highest < h as f32 + 0.25, "{kind:?} is {highest} tall against a box of {h}");
             // Young, it is smaller, and still stands on the ground.
             let mut young = Vec::new();
-            creature(&mut young, kind, Vec3::ZERO, 0.0, 0.0, 0.0, 0.0, 0.55, LIT);
+            creature(&mut young, kind, Vec3::ZERO, 0.0, 0.0, 0.0, 0.0, 0.55, 0.0, LIT);
             let top = young.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
             assert!(top < highest * 0.6, "{kind:?}");
         }

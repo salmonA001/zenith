@@ -1131,7 +1131,32 @@ pub fn refine(px: &Pixels, pattern: Pattern, seed: u32) -> Pixels {
             let g = tiled_noise(x, y, 2, seed) * 0.5
                 + tiled_noise(x, y, 4, seed + 7) * 0.3
                 + tiled_noise(x, y, 8, seed + 13) * 0.2;
-            let tone = (1.0 + g * grain) / if holes { alpha.max(0.5) } else { 1.0 };
+            // And what the stuff itself has: wood its grain, running the way the wood does, and
+            // stone its pits.
+            let own = match pattern {
+                Pattern::Planks
+                | Pattern::BenchTop
+                | Pattern::BenchSide
+                | Pattern::ChestFront
+                | Pattern::ChestSide
+                | Pattern::ChestTop
+                | Pattern::Trapdoor => tiled_noise(x, (y * 8) % FINE, 16, seed + 21) * 0.07,
+                Pattern::LogSide | Pattern::Door | Pattern::Ladder => {
+                    tiled_noise((x * 8) % FINE, y, 16, seed + 21) * 0.08
+                }
+                Pattern::Noise
+                | Pattern::Speckle
+                | Pattern::Strata
+                | Pattern::Cobble
+                | Pattern::Ore
+                | Pattern::Blocks
+                | Pattern::Bricks => {
+                    let pit = tiled_noise(x, y, 2, seed + 31) * 0.6 + tiled_noise(x, y, 4, seed + 37) * 0.4;
+                    if pit > 0.5 { -(pit - 0.5) * 0.5 } else { 0.0 }
+                }
+                _ => 0.0,
+            };
+            let tone = (1.0 + g * grain + own) / if holes { alpha.max(0.5) } else { 1.0 };
             let channel = |v: f64| (v * tone).round().clamp(0.0, 255.0) as u8;
             let a = if holes { 255 } else { (alpha * 255.0).round() as u8 };
             out.push([channel(p[0]), channel(p[1]), channel(p[2]), a]);

@@ -976,6 +976,8 @@ impl Game {
                         *phase * 6.0,
                         speed,
                         if e.baby { 0.55 } else { 1.0 },
+                        // Each in its own time, so a herd does not breathe as one.
+                        seconds + (e.id % 97) as f32 * 0.37,
                         light,
                     );
                     if let Some(name) = &e.name {
