@@ -1,0 +1,52 @@
+{
+  "name": "masonry",
+  "blocks": [
+    {
+      "name": "marble", "display": "Marble", "hardness": 1.5, "tool": "Pick",
+      "tex": {
+        "top": { "pattern": "Blocks", "a": [238, 236, 230], "b": [198, 194, 188], "seed": 51 },
+        "bottom": { "pattern": "Blocks", "a": [238, 236, 230], "b": [198, 194, 188], "seed": 52 },
+        "side": { "pattern": "Blocks", "a": [238, 236, 230], "b": [198, 194, 188], "seed": 53 }
+      }
+    },
+    {
+      "name": "basalt", "display": "Basalt", "hardness": 1.8, "tool": "Pick",
+      "tex": {
+        "top": { "pattern": "Speckle", "a": [62, 62, 68], "b": [40, 40, 46], "seed": 61 },
+        "bottom": { "pattern": "Speckle", "a": [62, 62, 68], "b": [40, 40, 46], "seed": 62 },
+        "side": { "pattern": "Strata", "a": [62, 62, 68], "b": [40, 40, 46], "seed": 63 }
+      }
+    },
+    {
+      "name": "mossy_bricks", "display": "Mossy Bricks", "hardness": 1.5, "tool": "Pick",
+      "tex": {
+        "top": { "pattern": "Bricks", "a": [124, 132, 112], "b": [78, 98, 62], "seed": 71 },
+        "bottom": { "pattern": "Bricks", "a": [124, 132, 112], "b": [78, 98, 62], "seed": 72 },
+        "side": { "pattern": "Bricks", "a": [124, 132, 112], "b": [78, 98, 62], "seed": 73 }
+      }
+    },
+    {
+      "name": "dark_tiles", "display": "Dark Tiles", "hardness": 1.5, "tool": "Pick",
+      "tex": {
+        "top": { "pattern": "Blocks", "a": [46, 48, 58], "b": [28, 30, 38], "seed": 81 },
+        "bottom": { "pattern": "Blocks", "a": [46, 48, 58], "b": [28, 30, 38], "seed": 82 },
+        "side": { "pattern": "Blocks", "a": [46, 48, 58], "b": [28, 30, 38], "seed": 83 }
+      }
+    },
+    {
+      "name": "sandstone_bricks", "display": "Sandstone Bricks", "hardness": 1.2, "tool": "Pick",
+      "tex": {
+        "top": { "pattern": "Bricks", "a": [224, 202, 152], "b": [190, 166, 118], "seed": 91 },
+        "bottom": { "pattern": "Bricks", "a": [224, 202, 152], "b": [190, 166, 118], "seed": 92 },
+        "side": { "pattern": "Bricks", "a": [224, 202, 152], "b": [190, 166, 118], "seed": 93 }
+      }
+    }
+  ],
+  "recipes": [
+    { "inputs": ["stone", "snow_block"], "out": "marble", "count": 2 },
+    { "inputs": ["cobble", "coal"], "out": "basalt", "count": 2 },
+    { "inputs": ["stone_brick", "dirt"], "out": "mossy_bricks", "count": 1 },
+    { "pattern": ["ss", "ss"], "key": { "s": "slate" }, "out": "dark_tiles", "count": 4 },
+    { "pattern": ["ss", "ss"], "key": { "s": "sandstone" }, "out": "sandstone_bricks", "count": 4 }
+  ]
+}

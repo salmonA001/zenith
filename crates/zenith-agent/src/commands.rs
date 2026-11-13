@@ -25,7 +25,7 @@ pub struct CommandSpec {
     pub args: &'static [ArgSpec],
     /// Whether this command changes the world, the player or the game.
     pub acts: bool,
-    /// Needs a window with a GPU: only the windowed game answers it.
+    /// About what is on screen: the game answers it, and a headless player cannot.
     pub needs_gpu: bool,
 }
 
@@ -40,6 +40,10 @@ const fn observe(name: &'static str, help: &'static str, args: &'static [ArgSpec
 }
 const fn action(name: &'static str, group: &'static str, help: &'static str, args: &'static [ArgSpec]) -> CommandSpec {
     CommandSpec { name, group, help, args, acts: true, needs_gpu: false }
+}
+
+const fn screen(name: &'static str, help: &'static str, args: &'static [ArgSpec]) -> CommandSpec {
+    CommandSpec { name, group: "Screen", help, args, acts: true, needs_gpu: true }
 }
 
 const XYZ: [ArgSpec; 3] =
@@ -63,7 +67,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     observe(
         "find_block",
         "The nearest loaded blocks of a kind",
-        &[req("block", ArgKind::Text, "block name, such as oak_log"), opt("radius", ArgKind::Int, "search radius (default 32)")],
+        &[
+            req("block", ArgKind::Text, "block name, such as oak_log"),
+            opt("radius", ArgKind::Int, "search radius (default 32)"),
+        ],
     ),
     observe(
         "entities",
@@ -72,7 +79,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     observe("inventory", "Everything the player carries, and the open screen", &[]),
     observe("recipes", "How an item is crafted", &[req("item", ArgKind::Text, "item name")]),
-    observe("events", "What happened since a point, oldest first", &[opt("since", ArgKind::Int, "only events after this number")]),
+    observe(
+        "events",
+        "What happened since a point, oldest first",
+        &[opt("since", ArgKind::Int, "only events after this number")],
+    ),
     observe("messages", "Recent chat", &[opt("n", ArgKind::Int, "how many lines (default 20)")]),
     action(
         "wait_ready",
@@ -109,9 +120,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         "look",
         "Move",
         "Set the view direction",
-        &[req("yaw", ArgKind::Number, "degrees, 0 faces south"), req("pitch", ArgKind::Number, "degrees, 90 is straight down")],
+        &[
+            req("yaw", ArgKind::Number, "degrees, 0 faces south"),
+            req("pitch", ArgKind::Number, "degrees, 90 is straight down"),
+        ],
     ),
-    action("look_at", "Move", "Face a point", &[req("x", ArgKind::Number, "x"), req("y", ArgKind::Number, "y"), req("z", ArgKind::Number, "z")]),
+    action(
+        "look_at",
+        "Move",
+        "Face a point",
+        &[req("x", ArgKind::Number, "x"), req("y", ArgKind::Number, "y"), req("z", ArgKind::Number, "z")],
+    ),
+    action("fly", "Move", "Take off, or land again (creative mode only)", &[opt("off", ArgKind::Flag, "land")]),
     action("break", "Act", "Mine a block, walking within reach first; replies with what it dropped", &XYZ),
     action(
         "place",
@@ -126,6 +146,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     action("interact", "Act", "Use what is in hand on a block: opens stations, flips levers", &XYZ),
     action("eat", "Act", "Eat the first food in the inventory", &[]),
+    action("use", "Act", "Use what is in hand where the view points: cast or pull a fishing rod, fill a bucket", &[]),
     action("attack", "Act", "Hit an entity, walking within reach first", &[req("entity", ArgKind::Int, "entity id")]),
     action("select", "Act", "Pick a hotbar slot", &[req("slot", ArgKind::Int, "0 to 8")]),
     action("drop", "Act", "Throw what is in hand", &[opt("all", ArgKind::Flag, "the whole stack")]),
@@ -139,7 +160,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         "click_slot",
         "Inventory",
         "Click a slot of the open screen",
-        &[req("slot", ArgKind::Int, "0-35 inventory, 100+ the screen"), opt("button", ArgKind::Text, "left, right or quick (default left)")],
+        &[
+            req("slot", ArgKind::Int, "0-35 inventory, 100+ the screen"),
+            opt("button", ArgKind::Text, "left, right or quick (default left)"),
+        ],
     ),
     action("close_screen", "Inventory", "Close the open screen", &[]),
     action("chat", "Talk", "Say something, or run a /command", &[req("text", ArgKind::Text, "what to say")]),
@@ -153,6 +177,39 @@ pub const COMMANDS: &[CommandSpec] = &[
         acts: false,
         needs_gpu: true,
     },
+    CommandSpec {
+        name: "frame",
+        group: "Observe",
+        help: "Which screen is showing, its size, and how fast it is being drawn",
+        args: &[],
+        acts: false,
+        needs_gpu: true,
+    },
+    screen(
+        "key",
+        "Press a key, as if at the keyboard",
+        &[
+            req(
+                "name",
+                ArgKind::Text,
+                "a letter or digit, or space, enter, escape, backspace, shift, ctrl, slash, f1 to f12",
+            ),
+            opt("hold", ArgKind::Flag, "keep it down until released"),
+            opt("release", ArgKind::Flag, "let go of a held key"),
+        ],
+    ),
+    screen("type", "Type into the chat or the field that has focus", &[req("text", ArgKind::Text, "what to type")]),
+    screen(
+        "mouse",
+        "Move the pointer, and click if asked, on the title screen and the screens over a world",
+        &[
+            req("x", ArgKind::Number, "pixels from the left of a screenshot"),
+            req("y", ArgKind::Number, "pixels from the top of a screenshot"),
+            opt("left", ArgKind::Flag, "click the left button"),
+            opt("right", ArgKind::Flag, "click the right button"),
+            opt("shift", ArgKind::Flag, "with shift held"),
+        ],
+    ),
 ];
 
 pub fn find(name: &str) -> Option<&'static CommandSpec> {
@@ -181,7 +238,7 @@ pub fn reference_markdown() -> String {
                 .iter()
                 .map(|a| format!("`{}`{}: {}", a.name, if a.required { "" } else { " (optional)" }, a.help))
                 .collect();
-            let gpu = if c.needs_gpu { " (windowed game only)" } else { "" };
+            let gpu = if c.needs_gpu { " (the game only, not a headless player)" } else { "" };
             out.push_str(&format!(
                 "| `{}` | {}{} | {} |\n",
                 c.name,

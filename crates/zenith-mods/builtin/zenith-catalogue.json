@@ -1,0 +1,31 @@
+{
+  "zenith_catalogue": 1,
+  "name": "Examples",
+  "description": "Three small mods that come with the game, to show what a mod can do.",
+  "mods": [
+    {
+      "id": "neon",
+      "name": "Neon Lights",
+      "version": "1.0.0",
+      "author": "Zenith",
+      "description": "Glowing glass in four colours, made from glass and ember dust.",
+      "file": "neon.json"
+    },
+    {
+      "id": "masonry",
+      "name": "Masonry",
+      "version": "1.2.0",
+      "author": "Zenith",
+      "description": "Marble, basalt, mossy bricks, dark tiles and sandstone bricks.",
+      "file": "masonry.json"
+    },
+    {
+      "id": "garden",
+      "name": "Garden",
+      "version": "0.9.0",
+      "author": "Zenith",
+      "description": "Lavender, marigolds and bracken to plant, and hedges to grow walls of.",
+      "file": "garden.json"
+    }
+  ]
+}

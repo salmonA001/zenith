@@ -1,0 +1,43 @@
+{
+  "name": "neon",
+  "blocks": [
+    {
+      "name": "neon_pink", "display": "Pink Neon", "emission": 13, "hardness": 0.4, "sound": "Glass",
+      "tex": {
+        "top": { "pattern": "Noise", "a": [255, 80, 196], "b": [214, 28, 150], "seed": 11 },
+        "bottom": { "pattern": "Noise", "a": [255, 80, 196], "b": [214, 28, 150], "seed": 12 },
+        "side": { "pattern": "Noise", "a": [255, 80, 196], "b": [214, 28, 150], "seed": 13 }
+      }
+    },
+    {
+      "name": "neon_cyan", "display": "Cyan Neon", "emission": 13, "hardness": 0.4, "sound": "Glass",
+      "tex": {
+        "top": { "pattern": "Noise", "a": [70, 232, 255], "b": [12, 160, 220], "seed": 21 },
+        "bottom": { "pattern": "Noise", "a": [70, 232, 255], "b": [12, 160, 220], "seed": 22 },
+        "side": { "pattern": "Noise", "a": [70, 232, 255], "b": [12, 160, 220], "seed": 23 }
+      }
+    },
+    {
+      "name": "neon_lime", "display": "Lime Neon", "emission": 13, "hardness": 0.4, "sound": "Glass",
+      "tex": {
+        "top": { "pattern": "Noise", "a": [180, 255, 70], "b": [96, 200, 24], "seed": 31 },
+        "bottom": { "pattern": "Noise", "a": [180, 255, 70], "b": [96, 200, 24], "seed": 32 },
+        "side": { "pattern": "Noise", "a": [180, 255, 70], "b": [96, 200, 24], "seed": 33 }
+      }
+    },
+    {
+      "name": "neon_amber", "display": "Amber Neon", "emission": 13, "hardness": 0.4, "sound": "Glass",
+      "tex": {
+        "top": { "pattern": "Noise", "a": [255, 196, 70], "b": [232, 124, 12], "seed": 41 },
+        "bottom": { "pattern": "Noise", "a": [255, 196, 70], "b": [232, 124, 12], "seed": 42 },
+        "side": { "pattern": "Noise", "a": [255, 196, 70], "b": [232, 124, 12], "seed": 43 }
+      }
+    }
+  ],
+  "recipes": [
+    { "inputs": ["glass", "ember_dust"], "out": "neon_pink", "count": 2 },
+    { "inputs": ["glass", "ember_dust", "crystal"], "out": "neon_cyan", "count": 2 },
+    { "inputs": ["glass", "ember_dust", "copper_ingot"], "out": "neon_lime", "count": 2 },
+    { "inputs": ["glass", "ember_dust", "coal"], "out": "neon_amber", "count": 2 }
+  ]
+}

@@ -1,11 +1,48 @@
 [package]
 name = "zenith-client"
+description = "The game with a window: renderer, screens, input and sound."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "zenith"
+path = "src/main.rs"
+
+[features]
+default = ["audio"]
+audio = ["dep:cpal"]
+
 [dependencies]
+bytemuck.workspace = true
+cpal = { version = "0.18", optional = true }
+glam.workspace = true
+png.workspace = true
+pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wgpu.workspace = true
 winit.workspace = true
-pollster.workspace = true
+zenith-agent = { path = "../zenith-agent" }
+zenith-content = { path = "../zenith-content" }
+zenith-core = { path = "../zenith-core" }
+zenith-fetch = { path = "../zenith-fetch" }
+zenith-mesh = { path = "../zenith-mesh" }
+zenith-mods = { path = "../zenith-mods" }
+zenith-protocol = { path = "../zenith-protocol" }
+zenith-server = { path = "../zenith-server" }
+zenith-world = { path = "../zenith-world" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { version = "3", default-features = false }
+
+# A NativeActivity: the app is all native code, with no Java of its own.
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { workspace = true, features = ["android-native-activity"] }
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
+[lints]
+workspace = true

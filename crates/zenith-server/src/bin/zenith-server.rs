@@ -24,6 +24,7 @@ USAGE: zenith-server [OPTIONS]
   --max-players N    (default: 200)
   --threads N        chunk worker threads (default: half the cores)
   --packs DIR        content packs, sent to clients as they join (default: <world>/packs)
+  --mods             also send the mods that are on in this computer's Zenith mod library
   --no-mobs          no natural mob spawning
   --help
 
@@ -45,6 +46,7 @@ fn run() -> Result<(), String> {
     };
     let (mut port, mut bind) = (25575u16, "0.0.0.0".to_string());
     let mut packs_dir: Option<PathBuf> = None;
+    let mut with_mods = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what}"));
@@ -57,11 +59,16 @@ fn run() -> Result<(), String> {
             "--password" => cfg.password = Some(value("a password")?),
             "--op" => cfg.ops.push(value("a name")?),
             "--creative" => cfg.default_mode = GameMode::Creative,
-            "--sim-distance" => cfg.sim_distance = value("a number")?.parse().map_err(|_| "--sim-distance needs a number")?,
-            "--max-players" => cfg.max_players = value("a number")?.parse().map_err(|_| "--max-players needs a number")?,
+            "--sim-distance" => {
+                cfg.sim_distance = value("a number")?.parse().map_err(|_| "--sim-distance needs a number")?
+            }
+            "--max-players" => {
+                cfg.max_players = value("a number")?.parse().map_err(|_| "--max-players needs a number")?
+            }
             "--threads" => cfg.threads = value("a number")?.parse().map_err(|_| "--threads needs a number")?,
             "--packs" => packs_dir = Some(PathBuf::from(value("a folder")?)),
             "--no-mobs" => cfg.spawn_mobs = false,
+            "--mods" => with_mods = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -71,10 +78,15 @@ fn run() -> Result<(), String> {
     }
     let world = cfg.world_dir.clone().unwrap_or_default();
     cfg.packs = load_packs(&packs_dir.unwrap_or_else(|| world.join("packs")))?;
+    if with_mods {
+        let library = zenith_mods::Library::open(&zenith_mods::default_home())?;
+        cfg.packs.extend(library.enabled_packs()?);
+    }
     let packs = cfg.packs.len();
 
     let stop = Arc::new(AtomicBool::new(false));
-    let (addr, peers) = listen((bind.as_str(), port), stop.clone()).map_err(|e| format!("cannot listen on {bind}:{port}: {e}"))?;
+    let (addr, peers) =
+        listen((bind.as_str(), port), stop.clone()).map_err(|e| format!("cannot listen on {bind}:{port}: {e}"))?;
     let mut server = Server::new(cfg)?;
     println!(
         "zenith-server: world {} (seed {}, {packs} content packs), listening on {addr}",

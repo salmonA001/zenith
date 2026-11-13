@@ -154,12 +154,30 @@ pub fn tree_for(biome: Biome, rng: &mut Rng) -> Option<(u32, Tree)> {
     let roll = rng.f64();
     let pick = match biome {
         Biome::Plains => (1, if roll < 0.15 { Tree::Oak } else { Tree::Bush }),
-        Biome::Forest => (11, if roll < 0.06 { Tree::BigOak } else if roll < 0.25 { Tree::Birch } else { Tree::Oak }),
+        Biome::Forest => (
+            11,
+            if roll < 0.06 {
+                Tree::BigOak
+            } else if roll < 0.25 {
+                Tree::Birch
+            } else {
+                Tree::Oak
+            },
+        ),
         Biome::BirchForest => (10, if roll < 0.9 { Tree::Birch } else { Tree::Oak }),
         Biome::Taiga => (9, Tree::Pine),
         Biome::Tundra => (1, Tree::Pine),
         Biome::Savanna => (2, if roll < 0.8 { Tree::Acacia } else { Tree::Bush }),
-        Biome::Rainforest => (16, if roll < 0.35 { Tree::Jungle } else if roll < 0.7 { Tree::Bush } else { Tree::Oak }),
+        Biome::Rainforest => (
+            16,
+            if roll < 0.35 {
+                Tree::Jungle
+            } else if roll < 0.7 {
+                Tree::Bush
+            } else {
+                Tree::Oak
+            },
+        ),
         Biome::Swamp => (4, Tree::Swamp),
         Biome::Mountains => (2, Tree::Pine),
         _ => return None,

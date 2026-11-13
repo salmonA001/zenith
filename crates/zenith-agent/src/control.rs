@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -21,6 +23,19 @@ pub struct ControlServer {
     pub requests: Receiver<Request>,
     pub port: u16,
     pub token: String,
+    /// Requests whose replies have not been written back yet.
+    unanswered: Arc<AtomicUsize>,
+}
+
+impl ControlServer {
+    /// Waits, up to `limit`, for every reply already given to reach its client. A program about to
+    /// exit calls this, or its last reply (to `quit`, say) can be lost with the process.
+    pub fn settle(&self, limit: Duration) {
+        let deadline = std::time::Instant::now() + limit;
+        while self.unanswered.load(Ordering::Acquire) > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
 }
 
 /// Starts listening, and writes where to `endpoint` as `{"port":N,"token":"..."}`.
@@ -34,15 +49,17 @@ pub fn start(endpoint: &Path) -> std::io::Result<ControlServer> {
     std::fs::write(endpoint, json!({ "port": port, "token": token }).to_string())?;
     let (tx, requests) = mpsc::channel();
     let expected = token.clone();
+    let unanswered = Arc::new(AtomicUsize::new(0));
+    let counting = unanswered.clone();
     std::thread::Builder::new().name("control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
-            let (tx, expected) = (tx.clone(), expected.clone());
+            let (tx, expected, counting) = (tx.clone(), expected.clone(), counting.clone());
             let _ = std::thread::Builder::new().name("control-conn".into()).spawn(move || {
-                let _ = serve(stream, &tx, &expected);
+                let _ = serve(stream, &tx, &expected, &counting);
             });
         }
     })?;
-    Ok(ControlServer { requests, port, token })
+    Ok(ControlServer { requests, port, token, unanswered })
 }
 
 fn make_token() -> String {
@@ -54,7 +71,7 @@ fn make_token() -> String {
     format!("{a:016x}{b:016x}")
 }
 
-fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str) -> std::io::Result<()> {
+fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str, unanswered: &AtomicUsize) -> std::io::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -74,7 +91,9 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str) -> std::io::Resul
                 let cmd = v.get("cmd").and_then(Value::as_str).unwrap_or_default().to_string();
                 let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
                 let (reply_tx, reply_rx) = mpsc::channel();
+                unanswered.fetch_add(1, Ordering::AcqRel);
                 if tx.send(Request { cmd, args, reply: reply_tx }).is_err() {
+                    unanswered.fetch_sub(1, Ordering::AcqRel);
                     return Ok(());
                 }
                 // A command waits as long as it takes: walking somewhere can take a minute.
@@ -82,13 +101,20 @@ fn serve(stream: TcpStream, tx: &Sender<Request>, token: &str) -> std::io::Resul
                     match reply_rx.recv_timeout(Duration::from_secs(1)) {
                         Ok(a) => break a,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break json!({"ok": false, "error": "the game went away"}),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            break json!({"ok": false, "error": "the game went away"});
+                        }
                     }
                 }
             }
-            Err(e) => json!({"ok": false, "error": format!("that is not JSON: {e}")}),
+            Err(e) => {
+                unanswered.fetch_add(1, Ordering::AcqRel);
+                json!({"ok": false, "error": format!("that is not JSON: {e}")})
+            }
         };
-        writeln!(writer, "{answer}")?;
+        let written = writeln!(writer, "{answer}").and_then(|()| writer.flush());
+        unanswered.fetch_sub(1, Ordering::AcqRel);
+        written?;
     }
 }
 
@@ -117,10 +143,12 @@ impl ControlClient {
 
     fn try_connect(endpoint: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(endpoint).map_err(|e| format!("cannot read {}: {e}", endpoint.display()))?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("{} is not an endpoint file: {e}", endpoint.display()))?;
+        let v: Value =
+            serde_json::from_str(&text).map_err(|e| format!("{} is not an endpoint file: {e}", endpoint.display()))?;
         let port = v["port"].as_u64().ok_or("the endpoint file has no port")? as u16;
         let token = v["token"].as_str().ok_or("the endpoint file has no token")?;
-        let writer = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).map_err(|e| format!("nothing answered on port {port}: {e}"))?;
+        let writer = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .map_err(|e| format!("nothing answered on port {port}: {e}"))?;
         let reader = BufReader::new(writer.try_clone().map_err(|e| e.to_string())?);
         let mut c = Self { writer, reader };
         c.write_line(&format!("auth {token}"))?;

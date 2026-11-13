@@ -54,11 +54,168 @@ pub enum Shape {
     Crate,
     /// Water and lava. Meta is the level: 0 is a source, 1-7 thinner and thinner. Bit 3: falling.
     Fluid,
+    /// A crop: crossed quads like a plant, as tall as it has grown. Meta 0-7 is how far, 7 ripe.
+    Crop,
+    /// Tilled soil, a sixteenth short of a full block.
+    Farmland,
+    /// Half a bed. Meta 0-3: the way from its foot to its head, north, south, west, east.
+    Bed,
+    /// Half a door. Meta bits 0-1: which side of its cell it closes, north, south, west, east.
+    /// Bit 2: open, swung a quarter turn onto the next side round. Bit 3: the top half.
+    Door,
+    /// Bits 0-1: the side its hinge is on. Bit 2: open, standing against that side. Bit 3: in the
+    /// top of its cell rather than the bottom.
+    Trapdoor,
+    /// A post, with rails to whichever neighbours it joins: meta bits 0-3 north, south, west, east.
+    /// Too tall to jump.
+    Fence,
+    /// A gate in a fence. Bits 0-1: which way it faces; north and south span east to west. Bit 2: open.
+    Gate,
+    /// A board with words on it. Bits 0-1: the way the words face. Bit 2: on a wall, not a post.
+    Sign,
+    /// A rail, drawn flat on the ground or up a step, with nothing to bump into. Meta 0-9 is its
+    /// shape: see `rail_slopes`, and the server's rails module for the rest.
+    Rail,
+}
+
+/// Whether a rail of this meta rises a block across its cell.
+pub const fn rail_slopes(meta: u8) -> bool {
+    matches!(meta, 2..=5)
 }
 
 const WHOLE: B16 = [[0, 0, 0], [16, 16, 16]];
 const SLAB_LOW: B16 = [[0, 0, 0], [16, 8, 16]];
 const SLAB_HIGH: B16 = [[0, 8, 0], [16, 16, 16]];
+const FARMLAND: B16 = [[0, 0, 0], [16, 15, 16]];
+const BED: B16 = [[0, 0, 0], [16, 9, 16]];
+static DOOR: [[B16; 1]; 8] = [
+    // Closed, along the north, south, west or east side of its cell.
+    [[[0, 0, 0], [16, 16, 3]]],
+    [[[0, 0, 13], [16, 16, 16]]],
+    [[[0, 0, 0], [3, 16, 16]]],
+    [[[13, 0, 0], [16, 16, 16]]],
+    // Open: turned about its hinge onto the next side round, north to west to south to east.
+    [[[0, 0, 0], [3, 16, 16]]],
+    [[[13, 0, 0], [16, 16, 16]]],
+    [[[0, 0, 13], [16, 16, 16]]],
+    [[[0, 0, 0], [16, 16, 3]]],
+];
+const LEAF_LOW: B16 = [[0, 0, 0], [16, 3, 16]];
+const LEAF_HIGH: B16 = [[0, 13, 0], [16, 16, 16]];
+static TRAPDOOR: [[B16; 1]; 16] = [
+    [LEAF_LOW],
+    [LEAF_LOW],
+    [LEAF_LOW],
+    [LEAF_LOW],
+    [[[0, 0, 0], [16, 16, 3]]],
+    [[[0, 0, 13], [16, 16, 16]]],
+    [[[0, 0, 0], [3, 16, 16]]],
+    [[[13, 0, 0], [16, 16, 16]]],
+    [LEAF_HIGH],
+    [LEAF_HIGH],
+    [LEAF_HIGH],
+    [LEAF_HIGH],
+    [[[0, 0, 0], [16, 16, 3]]],
+    [[[0, 0, 13], [16, 16, 16]]],
+    [[[0, 0, 0], [3, 16, 16]]],
+    [[[13, 0, 0], [16, 16, 16]]],
+];
+
+/// Boxes that depend on the meta in more ways than a fixed table holds: fences, gates and signs.
+struct Built {
+    fence: Vec<Vec<B16>>,
+    fence_solid: Vec<Vec<B16>>,
+    gate: Vec<Vec<B16>>,
+    gate_solid: Vec<Vec<B16>>,
+    sign: Vec<Vec<B16>>,
+}
+
+/// A box turned a quarter about the vertical: x for z.
+const fn turned(b: B16) -> B16 {
+    [[b[0][2], b[0][1], b[0][0]], [b[1][2], b[1][1], b[1][0]]]
+}
+
+fn built() -> &'static Built {
+    static BUILT: std::sync::OnceLock<Built> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        // A fence's rails, and its tall walls, toward north, south, west and east.
+        let rails: [[B16; 2]; 4] = [
+            [[[7, 6, 0], [9, 9, 6]], [[7, 12, 0], [9, 15, 6]]],
+            [[[7, 6, 10], [9, 9, 16]], [[7, 12, 10], [9, 15, 16]]],
+            [[[0, 6, 7], [6, 9, 9]], [[0, 12, 7], [6, 15, 9]]],
+            [[[10, 6, 7], [16, 9, 9]], [[10, 12, 7], [16, 15, 9]]],
+        ];
+        let walls: [B16; 4] = [
+            [[6, 0, 0], [10, 24, 6]],
+            [[6, 0, 10], [10, 24, 16]],
+            [[0, 0, 6], [6, 24, 10]],
+            [[10, 0, 6], [16, 24, 10]],
+        ];
+        let mut fence = Vec::new();
+        let mut fence_solid = Vec::new();
+        for meta in 0..16usize {
+            let mut seen = vec![[[6, 0, 6], [10, 16, 10]]];
+            let mut solid = vec![[[6, 0, 6], [10, 24, 10]]];
+            for side in 0..4 {
+                if meta & (1 << side) != 0 {
+                    seen.extend(rails[side]);
+                    solid.push(walls[side]);
+                }
+            }
+            fence.push(seen);
+            fence_solid.push(solid);
+        }
+        // A gate across x, closed and open, then the same turned to go across z.
+        let closed: Vec<B16> = vec![
+            [[0, 5, 7], [2, 16, 9]],
+            [[14, 5, 7], [16, 16, 9]],
+            [[2, 6, 7], [14, 9, 9]],
+            [[2, 12, 7], [14, 15, 9]],
+            [[7, 9, 7], [9, 12, 9]],
+        ];
+        let open: Vec<B16> = vec![
+            [[0, 5, 7], [2, 16, 9]],
+            [[14, 5, 7], [16, 16, 9]],
+            [[0, 6, 9], [2, 9, 15]],
+            [[0, 12, 9], [2, 15, 15]],
+            [[14, 6, 9], [16, 9, 15]],
+            [[14, 12, 9], [16, 15, 15]],
+        ];
+        let across =
+            |list: &[B16], turn: bool| -> Vec<B16> { list.iter().map(|&b| if turn { turned(b) } else { b }).collect() };
+        let mut gate = Vec::new();
+        let mut gate_solid = Vec::new();
+        for meta in 0..8usize {
+            let turn = meta & 2 != 0;
+            let is_open = meta & 4 != 0;
+            gate.push(across(if is_open { &open } else { &closed }, turn));
+            gate_solid.push(if is_open { Vec::new() } else { across(&[[[0, 0, 6], [16, 24, 10]]], turn) });
+        }
+        // Signs: on a post, facing north, south, west, east; then on a wall behind their words.
+        let post: B16 = [[7, 0, 7], [9, 7, 9]];
+        let board: B16 = [[1, 7, 7], [15, 15, 9]];
+        let mut sign = Vec::new();
+        for facing in 0..4 {
+            sign.push(vec![if facing < 2 { board } else { turned(board) }, post]);
+        }
+        sign.push(vec![[[1, 4, 14], [15, 12, 16]]]);
+        sign.push(vec![[[1, 4, 0], [15, 12, 2]]]);
+        sign.push(vec![[[14, 4, 1], [16, 12, 15]]]);
+        sign.push(vec![[[0, 4, 1], [2, 12, 15]]]);
+        Built { fence, fence_solid, gate, gate_solid, sign }
+    })
+}
+
+static CROP_OUTLINE: [[B16; 1]; 8] = [
+    [[[2, 0, 2], [14, 2, 14]]],
+    [[[2, 0, 2], [14, 4, 14]]],
+    [[[2, 0, 2], [14, 6, 14]]],
+    [[[2, 0, 2], [14, 8, 14]]],
+    [[[2, 0, 2], [14, 10, 14]]],
+    [[[2, 0, 2], [14, 12, 14]]],
+    [[[2, 0, 2], [14, 14, 14]]],
+    [[[2, 0, 2], [14, 16, 14]]],
+];
 
 static STAIRS: [[B16; 2]; 8] = [
     [SLAB_LOW, [[0, 8, 0], [16, 16, 8]]],
@@ -77,8 +234,12 @@ static TORCH: [[B16; 1]; 5] = [
     [[[0, 3, 7], [3, 13, 9]]],
     [[[13, 3, 7], [16, 13, 9]]],
 ];
-static LADDER: [[B16; 1]; 4] =
-    [[[[0, 0, 0], [16, 16, 2]]], [[[0, 0, 14], [16, 16, 16]]], [[[0, 0, 0], [2, 16, 16]]], [[[14, 0, 0], [16, 16, 16]]]];
+static LADDER: [[B16; 1]; 4] = [
+    [[[0, 0, 0], [16, 16, 2]]],
+    [[[0, 0, 14], [16, 16, 16]]],
+    [[[0, 0, 0], [2, 16, 16]]],
+    [[[14, 0, 0], [16, 16, 16]]],
+];
 static LAYER: [[B16; 1]; 8] = [
     [[[0, 0, 0], [16, 2, 16]]],
     [[[0, 0, 0], [16, 4, 16]]],
@@ -110,22 +271,51 @@ impl Shape {
             Shape::Layer => &LAYER[(meta & 7) as usize],
             Shape::Inset => &[[[1, 0, 1], [15, 16, 15]]],
             Shape::Crate => &[[[1, 0, 1], [15, 15, 15]]],
-            Shape::Empty | Shape::Cross | Shape::Fluid => &[],
+            Shape::Farmland => std::slice::from_ref(&FARMLAND),
+            Shape::Bed => std::slice::from_ref(&BED),
+            Shape::Door => &DOOR[(meta & 7) as usize],
+            Shape::Trapdoor => &TRAPDOOR[(meta & 15) as usize],
+            Shape::Fence => &built().fence[(meta & 15) as usize],
+            Shape::Gate => &built().gate[(meta & 7) as usize],
+            Shape::Sign => &built().sign[(meta & 7) as usize],
+            Shape::Empty | Shape::Cross | Shape::Fluid | Shape::Crop | Shape::Rail => &[],
         }
     }
     /// The boxes a body collides with.
     pub fn collision(self, meta: u8) -> &'static [B16] {
         match self {
-            Shape::Cube | Shape::Slab | Shape::Stairs | Shape::Layer | Shape::Inset | Shape::Crate | Shape::Ladder => {
-                self.boxes(meta)
-            }
-            Shape::Empty | Shape::Cross | Shape::Torch | Shape::Flat | Shape::Button | Shape::Fluid => &[],
+            Shape::Cube
+            | Shape::Slab
+            | Shape::Stairs
+            | Shape::Layer
+            | Shape::Inset
+            | Shape::Crate
+            | Shape::Ladder
+            | Shape::Farmland
+            | Shape::Bed
+            | Shape::Door
+            | Shape::Trapdoor => self.boxes(meta),
+            // Too tall to jump, as a fence should be.
+            Shape::Fence => &built().fence_solid[(meta & 15) as usize],
+            Shape::Gate => &built().gate_solid[(meta & 7) as usize],
+            Shape::Sign
+            | Shape::Rail
+            | Shape::Empty
+            | Shape::Cross
+            | Shape::Torch
+            | Shape::Flat
+            | Shape::Button
+            | Shape::Fluid
+            | Shape::Crop => &[],
         }
     }
     /// The boxes the crosshair can hit: everything that can be broken.
     pub fn outline(self, meta: u8) -> &'static [B16] {
         match self {
             Shape::Cross => &[[[3, 0, 3], [13, 13, 13]]],
+            Shape::Crop => &CROP_OUTLINE[(meta & 7) as usize],
+            Shape::Rail if rail_slopes(meta) => &[[[0, 0, 0], [16, 8, 16]]],
+            Shape::Rail => &[[[0, 0, 0], [16, 2, 16]]],
             _ => self.boxes(meta),
         }
     }
@@ -150,6 +340,8 @@ pub enum Tool {
     Axe,
     Shovel,
     Sword,
+    /// Tills grass and dirt into farmland.
+    Hoe,
 }
 
 /// How a block picks up its biome's colour.
@@ -237,6 +429,28 @@ pub enum Pattern {
     Cactus,
     CactusTop,
     Tnt,
+    /// Tilled rows of soil.
+    Farmland,
+    /// Stalks (colour `a`) with ripe heads (colour `b`) at the top.
+    Crop,
+    /// A patchwork quilt, the top of a bed's foot.
+    Quilt,
+    /// A pillow on the quilt, the top of a bed's head.
+    Pillow,
+    /// A bed's wooden frame under the edge of its quilt.
+    BedSide,
+    /// A panelled wooden door.
+    Door,
+    /// A trapdoor: boards across a frame.
+    Trapdoor,
+    /// Two bars (colour `a`) along wooden ties (colour `b`), straight.
+    Rail,
+    /// The same, round a corner.
+    RailCurve,
+    /// Tongues of fire, colour `a` at the foot and `b` at the tips.
+    Flame,
+    /// Charred logs (colour `a`) laid across glowing coals (colour `b`).
+    Embers,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
@@ -307,6 +521,9 @@ pub struct BlockDef {
     pub contact_damage: u8,
     /// Whether it exists as an item.
     pub has_item: bool,
+    /// How readily it burns: the chances in a hundred that fire beside it takes it, each time the
+    /// fire flares. 0 never burns.
+    pub flammable: u8,
 }
 
 impl Default for BlockDef {
@@ -334,6 +551,7 @@ impl Default for BlockDef {
             fragile: false,
             contact_damage: 0,
             has_item: true,
+            flammable: 0,
         }
     }
 }
@@ -371,6 +589,15 @@ mod tests {
             Shape::Inset,
             Shape::Crate,
             Shape::Cross,
+            Shape::Crop,
+            Shape::Farmland,
+            Shape::Bed,
+            Shape::Door,
+            Shape::Trapdoor,
+            Shape::Fence,
+            Shape::Gate,
+            Shape::Sign,
+            Shape::Rail,
         ];
         for shape in shapes {
             for meta in 0..16 {
@@ -381,6 +608,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fences_and_closed_gates_are_too_tall_to_jump_and_open_gates_let_you_by() {
+        assert!(Shape::Fence.collision(0).iter().all(|b| b[1][1] == 24));
+        assert_eq!(Shape::Fence.boxes(0b1111).len(), 9, "a post and two rails each way");
+        assert!(Shape::Gate.collision(0).iter().any(|b| b[1][1] == 24));
+        assert!(Shape::Gate.collision(4).is_empty());
+        assert_eq!(Shape::Gate.boxes(2)[0], turned(Shape::Gate.boxes(0)[0]));
+        assert!(Shape::Sign.collision(0).is_empty());
+    }
+
+    #[test]
+    fn an_open_door_turns_onto_the_next_side_and_a_closed_trapdoor_lies_flat() {
+        for facing in 0..4u8 {
+            assert_ne!(Shape::Door.boxes(facing), Shape::Door.boxes(facing | 4));
+            assert_eq!(Shape::Door.boxes(facing), Shape::Door.boxes(facing | 8), "the top half is the same");
+        }
+        assert_eq!(Shape::Trapdoor.boxes(0)[0], LEAF_LOW);
+        assert_eq!(Shape::Trapdoor.boxes(8)[0], LEAF_HIGH);
+        assert_eq!(Shape::Trapdoor.boxes(4), Shape::Door.boxes(0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Items in slots: stacking, clicking, crafting and furnaces. Pure rules over plain data.
 use serde::{Deserialize, Serialize};
-use zenith_content::{ItemStack, Registry};
+use zenith_content::{ItemKind, ItemStack, Registry};
 use zenith_protocol::{ClickButton, slots};
 
 pub type Slot = Option<ItemStack>;
@@ -13,11 +13,22 @@ pub struct Inventory {
     pub slots: Vec<Slot>,
     pub selected: u8,
     pub cursor: Slot,
+    /// What is worn, from head to feet.
+    #[serde(default)]
+    pub armor: [Slot; 4],
 }
 
 impl Default for Inventory {
     fn default() -> Self {
-        Self { slots: vec![None; INVENTORY_SIZE], selected: 0, cursor: None }
+        Self { slots: vec![None; INVENTORY_SIZE], selected: 0, cursor: None, armor: [None; 4] }
+    }
+}
+
+/// Which armour slot an item goes in, if it is armour.
+pub fn armor_slot(reg: &Registry, item: u16) -> Option<usize> {
+    match reg.item(item).map(|i| i.kind) {
+        Some(ItemKind::Armor { slot, .. }) => Some(slot as usize % 4),
+        _ => None,
     }
 }
 
@@ -50,15 +61,48 @@ impl Inventory {
         }
     }
 
-    /// Wears the held tool down. It breaks when used up.
-    pub fn damage_held(&mut self, reg: &Registry) {
-        let slot = &mut self.slots[self.selected as usize % 9];
-        if let Some(s) = slot {
-            if let Some(zenith_content::ItemKind::Tool { durability, .. }) = reg.item(s.item).map(|i| i.kind) {
+    /// The armour points worn, from all four slots.
+    pub fn armor_points(&self, reg: &Registry) -> u8 {
+        self.armor
+            .iter()
+            .flatten()
+            .map(|s| match reg.item(s.item).map(|i| i.kind) {
+                Some(ItemKind::Armor { points, .. }) => points,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Wears every piece worn down by a hit. A piece breaks when used up.
+    pub fn wear_armor(&mut self, reg: &Registry) {
+        for slot in &mut self.armor {
+            if let Some(s) = slot
+                && let Some(ItemKind::Armor { durability, .. }) = reg.item(s.item).map(|i| i.kind)
+            {
                 s.damage += 1;
                 if s.damage >= durability {
                     *slot = None;
                 }
+            }
+        }
+    }
+
+    /// Takes one of an item from wherever in the inventory it is. Returns whether there was one.
+    pub fn take(&mut self, item: u16) -> bool {
+        let Some(slot) = self.slots.iter_mut().find(|s| s.is_some_and(|s| s.item == item)) else { return false };
+        take_one(slot);
+        true
+    }
+
+    /// Wears the held tool down. It breaks when used up.
+    pub fn damage_held(&mut self, reg: &Registry) {
+        let slot = &mut self.slots[self.selected as usize % 9];
+        if let Some(s) = slot
+            && let Some(durability) = reg.item(s.item).and_then(|i| i.kind.durability())
+        {
+            s.damage += 1;
+            if s.damage >= durability {
+                *slot = None;
             }
         }
     }
@@ -119,14 +163,15 @@ impl Furnace {
         if self.burn_left > 0 {
             self.burn_left -= 1;
         }
-        if self.burn_left == 0 && result.is_some() {
-            if let Some(fuel) = self.fuel {
-                let burn = reg.item(fuel.item).map_or(0, |i| i.burn_ticks);
-                if burn > 0 {
-                    self.burn_left = burn;
-                    self.burn_total = burn;
-                    take_one(&mut self.fuel);
-                }
+        if self.burn_left == 0
+            && result.is_some()
+            && let Some(fuel) = self.fuel
+        {
+            let burn = reg.item(fuel.item).map_or(0, |i| i.burn_ticks);
+            if burn > 0 {
+                self.burn_left = burn;
+                self.burn_total = burn;
+                take_one(&mut self.fuel);
             }
         }
         match (self.burn_left > 0, result) {
@@ -165,7 +210,10 @@ fn take_one(slot: &mut Slot) {
 /// The parts of a screen a click can touch besides the player's own inventory.
 pub enum Holder<'a> {
     /// A crafting grid of `size` x `size`, kept in the player's `craft` slots.
-    Crafting { size: usize, grid: &'a mut Vec<Slot> },
+    Crafting {
+        size: usize,
+        grid: &'a mut Vec<Slot>,
+    },
     Furnace(&'a mut Furnace),
     Chest(&'a mut Vec<Slot>),
 }
@@ -219,8 +267,33 @@ fn click_slot(reg: &Registry, cursor: &mut Slot, slot: &mut Slot, button: ClickB
 
 /// Handles a click on `slot`. Bad slot numbers do nothing.
 pub fn click(reg: &Registry, inv: &mut Inventory, holder: &mut Holder, slot: u16, button: ClickButton) {
+    if (slots::ARMOR..slots::ARMOR + 4).contains(&slot) {
+        let i = (slot - slots::ARMOR) as usize;
+        if button == ClickButton::Quick {
+            if let Some(stack) = inv.armor[i].take() {
+                inv.armor[i] = add_to(reg, &mut inv.slots, stack);
+            }
+            return;
+        }
+        // Only the piece for this slot goes in it.
+        if inv.cursor.is_some_and(|c| armor_slot(reg, c.item) != Some(i)) {
+            return;
+        }
+        click_slot(reg, &mut inv.cursor, &mut inv.armor[i], button, false);
+        return;
+    }
     if slot < slots::INVENTORY {
         let i = slot as usize;
+        // In the player's own screen, shift-clicking a piece of armour puts it on.
+        if button == ClickButton::Quick
+            && matches!(holder, Holder::Crafting { size: 2, .. })
+            && let Some(stack) = inv.slots[i]
+            && let Some(a) = armor_slot(reg, stack.item)
+            && inv.armor[a].is_none()
+        {
+            inv.armor[a] = inv.slots[i].take();
+            return;
+        }
         if button == ClickButton::Quick {
             let Some(stack) = inv.slots[i].take() else { return };
             let left = match holder {
@@ -353,7 +426,13 @@ mod tests {
         ItemStack::new(id(r, name), count)
     }
     fn total(inv: &Inventory, item: u16) -> u32 {
-        inv.slots.iter().chain(std::iter::once(&inv.cursor)).flatten().filter(|s| s.item == item).map(|s| s.count as u32).sum()
+        inv.slots
+            .iter()
+            .chain(std::iter::once(&inv.cursor))
+            .flatten()
+            .filter(|s| s.item == item)
+            .map(|s| s.count as u32)
+            .sum()
     }
 
     #[test]
@@ -490,6 +569,34 @@ mod tests {
     }
 
     #[test]
+    fn armour_goes_on_its_own_slot_only_and_comes_off_again() {
+        let r = reg();
+        let mut inv = Inventory::default();
+        let mut grid = vec![None; 9];
+        let mut own = Holder::Crafting { size: 2, grid: &mut grid };
+        inv.slots[9] = Some(s(&r, "copper_helmet", 1));
+        inv.slots[10] = Some(s(&r, "dirt", 5));
+        // Shift-clicked in the player's own screen, a piece goes on.
+        click(&r, &mut inv, &mut own, 9, ClickButton::Quick);
+        assert_eq!(inv.armor[0].map(|a| a.item), Some(id(&r, "copper_helmet")));
+        assert_eq!(inv.armor_points(&r), 2);
+        // Dirt is not a helmet, nor are boots.
+        click(&r, &mut inv, &mut own, 10, ClickButton::Left);
+        click(&r, &mut inv, &mut own, slots::ARMOR + 3, ClickButton::Left);
+        assert!(inv.armor[3].is_none());
+        click(&r, &mut inv, &mut own, 10, ClickButton::Left);
+        inv.cursor = Some(s(&r, "copper_boots", 1));
+        click(&r, &mut inv, &mut own, slots::ARMOR, ClickButton::Left);
+        assert_eq!(inv.armor[0].map(|a| a.item), Some(id(&r, "copper_helmet")), "boots are not for the head");
+        click(&r, &mut inv, &mut own, slots::ARMOR + 3, ClickButton::Left);
+        assert!(inv.cursor.is_none() && inv.armor[3].is_some());
+        // And off again, into the inventory.
+        click(&r, &mut inv, &mut own, slots::ARMOR, ClickButton::Quick);
+        assert!(inv.armor[0].is_none());
+        assert!(inv.slots.iter().flatten().any(|st| st.item == id(&r, "copper_helmet")));
+    }
+
+    #[test]
     fn bad_slot_numbers_are_ignored() {
         let r = reg();
         let mut inv = Inventory::default();
@@ -504,11 +611,7 @@ mod tests {
     #[test]
     fn a_furnace_burns_fuel_to_cook_and_stops_without_it() {
         let r = reg();
-        let mut f = Furnace {
-            input: Some(s(&r, "iron_ore", 3)),
-            fuel: Some(s(&r, "stick", 1)),
-            ..Default::default()
-        };
+        let mut f = Furnace { input: Some(s(&r, "iron_ore", 3)), fuel: Some(s(&r, "stick", 1)), ..Default::default() };
         // A stick burns for 100 ticks: exactly one item.
         for _ in 0..150 {
             f.tick(&r);

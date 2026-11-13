@@ -248,14 +248,7 @@ impl Paletted {
                 let palette = (0..len).map(|_| read_u16(input)).collect::<Result<Vec<u16>, _>>()?;
                 let count = word_count(log_bits);
                 let bytes = take(input, count * 8)?;
-                let words: Box<[u64]> = bytes
-                    .chunks_exact(8)
-                    .map(|b| {
-                        let mut word = [0u8; 8];
-                        word.copy_from_slice(b);
-                        u64::from_le_bytes(word)
-                    })
-                    .collect();
+                let words: Box<[u64]> = bytes.as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
                 if (0..CELLS).any(|i| read_cell(&words, log_bits, i) >= len) {
                     return Err(DecodeError("cell outside the palette"));
                 }

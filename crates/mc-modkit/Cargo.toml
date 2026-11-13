@@ -1,0 +1,15 @@
+[package]
+name = "mc-modkit"
+description = "Mod loaders (Fabric, Quilt, Forge, NeoForge) and mods (Modrinth, CurseForge) for your own copy of Minecraft: Java Edition. Not part of Zenith, and not an official Minecraft product."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zenith-fetch = { path = "../zenith-fetch" }
+
+[lints]
+workspace = true

@@ -21,11 +21,7 @@ pub fn pick(w: &impl BlockAccess, reg: &Registry, origin: DVec3, dir: DVec3, rea
         return None;
     }
     let mut cell = BlockPos::from_vec(origin);
-    let step = [
-        if dir.x > 0.0 { 1 } else { -1 },
-        if dir.y > 0.0 { 1 } else { -1 },
-        if dir.z > 0.0 { 1 } else { -1 },
-    ];
+    let step = [if dir.x > 0.0 { 1 } else { -1 }, if dir.y > 0.0 { 1 } else { -1 }, if dir.z > 0.0 { 1 } else { -1 }];
     let boundary = |o: f64, d: f64, c: i32| -> f64 {
         if d == 0.0 {
             f64::INFINITY
@@ -35,7 +31,8 @@ pub fn pick(w: &impl BlockAccess, reg: &Registry, origin: DVec3, dir: DVec3, rea
             (c as f64 - o) / d
         }
     };
-    let mut t_next = [boundary(origin.x, dir.x, cell.x), boundary(origin.y, dir.y, cell.y), boundary(origin.z, dir.z, cell.z)];
+    let mut t_next =
+        [boundary(origin.x, dir.x, cell.x), boundary(origin.y, dir.y, cell.y), boundary(origin.z, dir.z, cell.z)];
     let t_delta = [
         if dir.x != 0.0 { 1.0 / dir.x.abs() } else { f64::INFINITY },
         if dir.y != 0.0 { 1.0 / dir.y.abs() } else { f64::INFINITY },
@@ -64,7 +61,14 @@ pub fn pick(w: &impl BlockAccess, reg: &Registry, origin: DVec3, dir: DVec3, rea
     }
 }
 
-fn test_cell(w: &impl BlockAccess, reg: &Registry, cell: BlockPos, origin: DVec3, dir: DVec3, reach: f64) -> Option<Hit> {
+fn test_cell(
+    w: &impl BlockAccess,
+    reg: &Registry,
+    cell: BlockPos,
+    origin: DVec3,
+    dir: DVec3,
+    reach: f64,
+) -> Option<Hit> {
     let state = w.block(cell);
     if state.is_air() {
         return None;
@@ -80,10 +84,11 @@ fn test_cell(w: &impl BlockAccess, reg: &Registry, cell: BlockPos, origin: DVec3
             base + DVec3::new(b[0][0] as f64, b[0][1] as f64, b[0][2] as f64) / 16.0,
             base + DVec3::new(b[1][0] as f64, b[1][1] as f64, b[1][2] as f64) / 16.0,
         );
-        if let Some((t, face)) = bx.ray(origin, dir) {
-            if t <= reach && best.is_none_or(|h| t < h.distance) {
-                best = Some(Hit { pos: cell, state, face, distance: t, point: origin + dir * t });
-            }
+        if let Some((t, face)) = bx.ray(origin, dir)
+            && t <= reach
+            && best.is_none_or(|h| t < h.distance)
+        {
+            best = Some(Hit { pos: cell, state, face, distance: t, point: origin + dir * t });
         }
     }
     best

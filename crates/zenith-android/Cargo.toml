@@ -1,0 +1,17 @@
+[package]
+name = "zenith-android"
+description = "The game as an Android app: the library a NativeActivity loads, around zenith-client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# Android loads the game as a shared library. Built for anything else, this is an empty one.
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+zenith-client = { path = "../zenith-client" }
+
+[lints]
+workspace = true

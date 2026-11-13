@@ -1,0 +1,16 @@
+BENCH_FLAGS="--look classic" tools/bench-client.sh 16 32, then BENCH_FLAGS="--look modern" tools/bench-client.sh 16 32.
+Release build, 1920x1080, no window, frame rate uncapped, ray tracing off. Same machine as 2026-11-03.
+
+Classic:
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 | 1.8 s | 640 | 1.62 | 2.35 | 0.75 | 1818 | 333051 | 83 |
+| 32 | 3.5 s | 342 | 2.93 | 3.62 | 1.48 | 7032 | 1460236 | 360 |
+
+Modern:
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 | 1.8 s | 343 | 2.94 | 3.80 | 1.27 | 1818 | 333051 | 83 |
+| 32 | 2.9 s | 195 | 5.15 | 6.02 | 2.57 | 7032 | 1460236 | 360 |

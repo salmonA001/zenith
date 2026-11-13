@@ -14,15 +14,22 @@ use zenith_world::{BlockAccess, Chunk, ChunkMap, GENERATOR_VERSION, Generator};
 
 /// Where the client's prediction differs from the server's by more than this, it is corrected.
 const CORRECTION_EPSILON: f64 = 1e-3;
-/// Most chunks asked for in one tick, so a teleport cannot flood the connection.
-const MAX_NEW_PER_TICK: usize = 256;
+/// Most chunks asked for in one go, so a teleport cannot flood the connection.
+const MAX_NEW_AT_ONCE: usize = 256;
+/// Generation jobs waiting per worker. Enough that the workers never run dry between two polls, and
+/// stale ones cost nothing: a job for a chunk the player has left gives up before generating it.
+const QUEUED_PER_WORKER: usize = 32;
 
 /// Something a window (or an agent) may want to react to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     ChunkReady(ChunkPos),
     ChunkGone(ChunkPos),
-    BlockChanged { pos: BlockPos, old: BlockState, new: BlockState },
+    BlockChanged {
+        pos: BlockPos,
+        old: BlockState,
+        new: BlockState,
+    },
     Effect(Effect),
     Chat(ChatLine),
     Disconnected(String),
@@ -31,7 +38,12 @@ pub enum Event {
     /// The server opened a station on this client's screen.
     ScreenOpened(ScreenKind),
     ScreenClosed,
-    ItemGained { item: u16, count: u32 },
+    ItemGained {
+        item: u16,
+        count: u32,
+    },
+    /// The server asks for words for the sign here.
+    EditSign(BlockPos),
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +61,10 @@ pub struct RemoteEntity {
     pub name: Option<String>,
     pub stack: Option<ItemStack>,
     pub block: BlockState,
+    /// A young animal, drawn small.
+    pub baby: bool,
+    /// Whose fishing float this is, or 0.
+    pub owner: u32,
 }
 
 fn unquantize(q: [i32; 3]) -> DVec3 {
@@ -75,12 +91,28 @@ pub struct Session {
     pub clock: Clock,
     pub health: u8,
     pub air: u8,
+    /// The food bar, 0-20.
+    pub food: u8,
+    /// Armour points worn.
+    pub armor_points: u8,
+    /// Asleep in a bed: the body stays put until the server wakes it or the player gets up.
+    pub sleeping: bool,
+    /// Experience: the level, and the way through the next one, 0-255.
+    pub level: u16,
+    pub xp: u8,
+    /// The boat or cart this player rides. The server moves the body then, and this side stops
+    /// guessing where it is.
+    pub riding: Option<u32>,
     pub inventory: Vec<Option<ItemStack>>,
+    /// What is worn, from head to feet.
+    pub armor: [Option<ItemStack>; 4],
     pub selected: u8,
     pub cursor: Option<ItemStack>,
     pub screen: Option<Screen>,
     pub entities: FxMap<u32, RemoteEntity>,
     pub players: Vec<PlayerEntry>,
+    /// What the signs in watched chunks say.
+    pub signs: FxMap<BlockPos, Vec<String>>,
     pub cracks: FxMap<BlockPos, u8>,
     pub chat: VecDeque<ChatLine>,
     pub events: Vec<Event>,
@@ -108,6 +140,9 @@ pub struct Session {
     shared_center: Arc<AtomicI64>,
     spiral: Vec<(i32, i32)>,
     spiral_for: i32,
+    /// How far into `spiral` everything is here or on its way, so a complete view costs nothing to
+    /// check again.
+    scanned: usize,
 }
 
 fn pack_center(c: ChunkPos) -> i64 {
@@ -120,7 +155,14 @@ fn unpack_center(v: i64) -> ChunkPos {
 
 impl Session {
     /// Says hello on `peer` and waits for the server's answer.
-    pub fn connect(peer: Peer, name: &str, password: Option<String>, view_radius: i32, threads: usize, timeout: Duration) -> Result<Self, String> {
+    pub fn connect(
+        peer: Peer,
+        name: &str,
+        password: Option<String>,
+        view_radius: i32,
+        threads: usize,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         if !peer.send(&C2S::Hello { protocol: PROTOCOL, name: name.into(), password }) {
             return Err("The connection closed straight away.".into());
         }
@@ -168,12 +210,20 @@ impl Session {
             clock: w.clock,
             health: 20,
             air: 20,
+            food: 20,
+            armor_points: 0,
+            sleeping: false,
+            level: 0,
+            xp: 0,
+            riding: None,
+            armor: [None; 4],
             inventory: vec![None; slots::INVENTORY as usize],
             selected: 0,
             cursor: None,
             screen: None,
             entities: FxMap::default(),
             players: Vec::new(),
+            signs: FxMap::default(),
             cracks: FxMap::default(),
             chat: VecDeque::new(),
             events: Vec::new(),
@@ -194,6 +244,7 @@ impl Session {
             shared_center: Arc::new(AtomicI64::new(0)),
             spiral: Vec::new(),
             spiral_for: -1,
+            scanned: 0,
         })
     }
 
@@ -211,6 +262,16 @@ impl Session {
 
     pub fn loaded_chunks(&self) -> usize {
         self.world.chunks.len()
+    }
+
+    /// Threads generating terrain for this session.
+    pub fn generator_threads(&self) -> usize {
+        self.pool.thread_count()
+    }
+
+    /// How many chunks the view needs, all told.
+    pub fn wanted_chunks(&self) -> usize {
+        spiral(self.view_radius).len()
     }
 
     /// Chunks wanted and not here yet.
@@ -237,6 +298,7 @@ impl Session {
             let Some(chunk) = chunk else {
                 // Given up on as stale; asked for again if it matters after all.
                 self.pending.remove(&pos);
+                self.scanned = 0;
                 if self.subscribed.remove(&pos).is_some() {
                     self.send(&C2S::Unsubscribe(vec![pos]));
                 }
@@ -247,6 +309,7 @@ impl Session {
                 self.try_finish(pos);
             }
         }
+        self.ask_for_missing();
     }
 
     fn lost(&mut self, why: String) {
@@ -261,11 +324,11 @@ impl Session {
         }
         let Some(p) = self.pending.remove(&pos) else { return };
         let Some(mut chunk) = p.generated else { return };
-        if let Some(sections) = &p.delta {
-            if let Err(e) = chunk.apply_encoded(sections) {
-                self.lost(format!("The server sent a bad chunk: {e}"));
-                return;
-            }
+        if let Some(sections) = &p.delta
+            && let Err(e) = chunk.apply_encoded(sections)
+        {
+            self.lost(format!("The server sent a bad chunk: {e}"));
+            return;
         }
         for c in p.blocks {
             chunk.set(c.pos.x & 15, c.pos.y, c.pos.z & 15, c.state);
@@ -323,6 +386,8 @@ impl Session {
                             name: e.name,
                             stack: e.stack,
                             block: e.block,
+                            baby: e.baby,
+                            owner: e.owner,
                         },
                     );
                 }
@@ -356,8 +421,15 @@ impl Session {
                 self.health = v.health;
                 self.air = v.air;
                 self.mode = v.mode;
+                self.food = v.food;
+                self.armor_points = v.armor;
+                self.sleeping = v.sleeping;
+                self.level = v.level;
+                self.xp = v.xp;
+                self.riding = v.riding;
             }
-            S2C::Inventory { slots, selected } => {
+            S2C::Inventory { slots, selected, armor } => {
+                self.armor = armor;
                 let count = |list: &[Option<ItemStack>], item: u16| -> u32 {
                     list.iter().flatten().filter(|s| s.item == item).map(|s| s.count as u32).sum()
                 };
@@ -377,10 +449,10 @@ impl Session {
             S2C::Screen(s) => {
                 let was_station = self.screen.as_ref().is_some_and(|x| x.kind != ScreenKind::Inventory);
                 let is_station = s.as_ref().is_some_and(|x| x.kind != ScreenKind::Inventory);
-                if let (Some(new), false) = (&s, was_station) {
-                    if is_station {
-                        self.events.push(Event::ScreenOpened(new.kind));
-                    }
+                if let (Some(new), false) = (&s, was_station)
+                    && is_station
+                {
+                    self.events.push(Event::ScreenOpened(new.kind));
                 }
                 if was_station && !is_station {
                     self.events.push(Event::ScreenClosed);
@@ -405,12 +477,18 @@ impl Session {
                 }
             },
             S2C::Players(list) => self.players = list,
+            S2C::Signs(list) => self.signs.extend(list),
+            S2C::EditSign(pos) => self.events.push(Event::EditSign(pos)),
             S2C::Ping(n) => self.send(&C2S::Pong(n)),
             S2C::Bye(why) => self.lost(why),
         }
     }
 
     fn block_changed(&mut self, c: BlockChange) {
+        // A sign gone is its words gone: a new one in its place starts blank.
+        if c.state.kind() != zenith_content::id::SIGN {
+            self.signs.remove(&c.pos);
+        }
         let pos = c.pos.chunk();
         if let Some(p) = self.pending.get_mut(&pos) {
             p.blocks.push(c);
@@ -427,17 +505,26 @@ impl Session {
 
     /// Lines the client's prediction up with what the server says happened.
     fn reconcile(&mut self, ack: u32, server: Body) {
+        // Riding, the server alone says where the body is.
+        if self.riding.is_some() {
+            self.history.clear();
+            self.body = server;
+            return;
+        }
         // Everything up to `ack` is settled.
         let mut predicted = None;
         while self.history.front().is_some_and(|&(seq, _, _)| seq <= ack) {
-            if let Some((seq, _, body)) = self.history.pop_front() {
-                if seq == ack {
-                    predicted = Some(body);
-                }
+            if let Some((seq, _, body)) = self.history.pop_front()
+                && seq == ack
+            {
+                predicted = Some(body);
             }
         }
         let wrong = match predicted {
-            Some(p) => p.pos.distance_squared(server.pos) > CORRECTION_EPSILON * CORRECTION_EPSILON || p.flying != server.flying,
+            Some(p) => {
+                p.pos.distance_squared(server.pos) > CORRECTION_EPSILON * CORRECTION_EPSILON
+                    || p.flying != server.flying
+            }
             // No record of it: only a server move (a teleport, a respawn) gets us here.
             None => self.history.is_empty() && self.body.pos.distance_squared(server.pos) > CORRECTION_EPSILON,
         };
@@ -462,13 +549,17 @@ impl Session {
             e.prev_yaw = e.yaw;
         }
         self.last_input = input;
+        self.clock.time = (self.clock.time + 1) % 24000;
         if self.health > 0 {
             self.seq += 1;
-            let reg = self.reg.clone();
-            physics::step(&mut self.body, input, &self.world, &reg, &mut self.boxes);
-            self.history.push_back((self.seq, input, self.body));
-            if self.history.len() > 200 {
-                self.history.pop_front();
+            // Riding, the keys steer the boat or cart, and the body goes where the server says.
+            if self.riding.is_none() {
+                let reg = self.reg.clone();
+                physics::step(&mut self.body, input, &self.world, &reg, &mut self.boxes);
+                self.history.push_back((self.seq, input, self.body));
+                if self.history.len() > 200 {
+                    self.history.pop_front();
+                }
             }
             self.send(&C2S::Input { seq: self.seq, input });
         }
@@ -486,11 +577,13 @@ impl Session {
         if self.spiral_for != self.view_radius {
             self.spiral = spiral(self.view_radius);
             self.spiral_for = self.view_radius;
+            self.scanned = 0;
         }
 
         // What is too far away goes.
         if self.center != Some(center) {
             self.center = Some(center);
+            self.scanned = 0;
             let keep = self.view_radius + 2;
             let far: Vec<ChunkPos> = self.world.chunks.keys().copied().filter(|p| p.distance(center) > keep).collect();
             let mut gone = Vec::with_capacity(far.len());
@@ -500,6 +593,8 @@ impl Session {
                 gone.push(p);
                 self.events.push(Event::ChunkGone(p));
             }
+            // Signs out of sight may change unseen: they are told again when they come back.
+            self.signs.retain(|p, _| p.chunk().distance(center) <= keep);
             self.pending.retain(|p, _| {
                 let keep_it = p.distance(center) <= keep;
                 if !keep_it {
@@ -514,16 +609,19 @@ impl Session {
                 self.send(&C2S::Unsubscribe(gone));
             }
         }
+        self.ask_for_missing();
+    }
 
-        // What is missing gets asked for, closest first, as fast as the workers can use it.
-        let limit = self.pool.thread_count() * 4;
+    /// What is missing gets asked for, closest first, as fast as the workers can use it. This runs on
+    /// every poll as well as every tick: refilling only once a tick left the workers idle for most of
+    /// it, and a 32-chunk view took 23 seconds to arrive.
+    fn ask_for_missing(&mut self) {
+        let Some(center) = self.center else { return };
+        let limit = self.pool.thread_count() * QUEUED_PER_WORKER;
         let mut asked = Vec::new();
-        let mut started = 0;
-        for i in 0..self.spiral.len() {
-            if self.in_flight >= limit || started >= MAX_NEW_PER_TICK {
-                break;
-            }
-            let (dx, dz) = self.spiral[i];
+        while self.scanned < self.spiral.len() && self.in_flight < limit && asked.len() < MAX_NEW_AT_ONCE {
+            let (dx, dz) = self.spiral[self.scanned];
+            self.scanned += 1;
             let pos = ChunkPos::new(center.x + dx, center.z + dz);
             if self.world.chunks.contains_key(&pos) || self.pending.contains_key(&pos) {
                 continue;
@@ -532,8 +630,8 @@ impl Session {
             self.subscribed.insert(pos, ());
             asked.push(pos);
             self.in_flight += 1;
-            started += 1;
-            let (generator, tx, shared, radius) = (self.generator.clone(), self.gen_tx.clone(), self.shared_center.clone(), self.view_radius);
+            let (generator, tx, shared, radius) =
+                (self.generator.clone(), self.gen_tx.clone(), self.shared_center.clone(), self.view_radius);
             self.pool.submit((dx * dx + dz * dz) as i64, move || {
                 // The player may have flown off while this waited.
                 let now = unpack_center(shared.load(Ordering::Relaxed));
@@ -553,7 +651,12 @@ impl Session {
     /// Whether everything within `radius` chunks of the player has arrived.
     pub fn ready_within(&self, radius: i32) -> bool {
         let c = BlockPos::from_vec(self.body.pos).chunk();
-        (-radius..=radius).all(|dx| (-radius..=radius).all(|dz| self.world.chunks.contains_key(&ChunkPos::new(c.x + dx, c.z + dz))))
+        // The same round shape chunks arrive in: the corners of a square would never come.
+        let in_view = |dx: i32, dz: i32| dx * dx + dz * dz <= radius * radius;
+        (-radius..=radius).all(|dx| {
+            (-radius..=radius)
+                .all(|dz| !in_view(dx, dz) || self.world.chunks.contains_key(&ChunkPos::new(c.x + dx, c.z + dz)))
+        })
     }
 
     /// The block under the crosshair for this input's view.

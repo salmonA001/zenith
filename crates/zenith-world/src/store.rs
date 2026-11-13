@@ -87,7 +87,9 @@ impl RegionFile {
             }
             if best.as_ref().is_none_or(|b| generation > b.0) {
                 let rows = bytes[SLOT_HEADER..]
-                    .chunks_exact(ROW)
+                    .as_chunks::<ROW>()
+                    .0
+                    .iter()
                     .map(|r| Row {
                         offset: u32::from_le_bytes(array(&r[0..4])),
                         length: u32::from_le_bytes(array(&r[4..8])),
@@ -186,10 +188,7 @@ impl RegionFile {
 
     /// The chunks saved here, as offsets inside this region.
     pub fn saved(&self) -> Vec<(i32, i32)> {
-        (0..CHUNKS)
-            .filter(|&i| self.table[i].length > 0)
-            .map(|i| ((i % 32) as i32, (i / 32) as i32))
-            .collect()
+        (0..CHUNKS).filter(|&i| self.table[i].length > 0).map(|i| ((i % 32) as i32, (i / 32) as i32)).collect()
     }
 }
 

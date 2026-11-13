@@ -1,0 +1,16 @@
+[package]
+name = "zenith-mods"
+description = "Zenith's mods: content packs from catalogues on the web, Git repositories and the built-in examples, kept in one library."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+zenith-content = { path = "../zenith-content" }
+zenith-fetch = { path = "../zenith-fetch" }
+
+[lints]
+workspace = true

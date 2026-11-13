@@ -1,0 +1,47 @@
+{
+  "name": "garden",
+  "blocks": [
+    {
+      "name": "lavender", "display": "Lavender", "shape": "Cross", "layer": "Cutout", "opacity": 0,
+      "hardness": 0.0, "replaceable": true, "fragile": true, "sound": "Grass",
+      "tex": {
+        "top": { "pattern": "Flower", "a": [156, 112, 226], "b": [70, 138, 64], "seed": 101 },
+        "bottom": { "pattern": "Flower", "a": [156, 112, 226], "b": [70, 138, 64], "seed": 101 },
+        "side": { "pattern": "Flower", "a": [156, 112, 226], "b": [70, 138, 64], "seed": 101 }
+      }
+    },
+    {
+      "name": "marigold", "display": "Marigold", "shape": "Cross", "layer": "Cutout", "opacity": 0,
+      "hardness": 0.0, "replaceable": true, "fragile": true, "sound": "Grass",
+      "tex": {
+        "top": { "pattern": "Flower", "a": [255, 168, 28], "b": [70, 138, 64], "seed": 111 },
+        "bottom": { "pattern": "Flower", "a": [255, 168, 28], "b": [70, 138, 64], "seed": 111 },
+        "side": { "pattern": "Flower", "a": [255, 168, 28], "b": [70, 138, 64], "seed": 111 }
+      }
+    },
+    {
+      "name": "bracken", "display": "Bracken", "shape": "Cross", "layer": "Cutout", "opacity": 0, "tint": "Grass",
+      "hardness": 0.0, "replaceable": true, "fragile": true, "sound": "Grass",
+      "tex": {
+        "top": { "pattern": "Tuft", "a": [210, 230, 200], "b": [150, 170, 140], "seed": 121 },
+        "bottom": { "pattern": "Tuft", "a": [210, 230, 200], "b": [150, 170, 140], "seed": 121 },
+        "side": { "pattern": "Tuft", "a": [210, 230, 200], "b": [150, 170, 140], "seed": 121 }
+      }
+    },
+    {
+      "name": "hedge", "display": "Hedge", "layer": "Cutout", "opacity": 1, "tint": "Foliage",
+      "hardness": 0.3, "tool": "Axe", "sound": "Grass",
+      "tex": {
+        "top": { "pattern": "Leaves", "a": [236, 244, 230], "b": [168, 184, 160], "seed": 131 },
+        "bottom": { "pattern": "Leaves", "a": [236, 244, 230], "b": [168, 184, 160], "seed": 132 },
+        "side": { "pattern": "Leaves", "a": [236, 244, 230], "b": [168, 184, 160], "seed": 133 }
+      }
+    }
+  ],
+  "recipes": [
+    { "inputs": ["dirt", "crystal"], "out": "lavender", "count": 2 },
+    { "inputs": ["dirt", "apple"], "out": "marigold", "count": 2 },
+    { "inputs": ["dirt", "stick"], "out": "bracken", "count": 2 },
+    { "pattern": ["ss", "ss"], "key": { "s": "stick" }, "out": "hedge", "count": 2 }
+  ]
+}

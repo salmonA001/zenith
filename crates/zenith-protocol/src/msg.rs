@@ -5,7 +5,7 @@ use zenith_core::{BlockPos, ChunkPos};
 use zenith_world::physics::{Body, MoveInput};
 
 /// Bump whenever a message changes shape. Clients and servers refuse each other otherwise.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameMode {
@@ -62,6 +62,23 @@ pub enum C2S {
     SetFlying(bool),
     Chat(String),
     Respawn,
+    /// Get out of bed.
+    WakeUp,
+    /// The words for a sign this player is writing: up to four lines.
+    SignText {
+        pos: BlockPos,
+        lines: Vec<String>,
+    },
+    /// Use what is in hand on a creature: feed it.
+    UseEntity {
+        entity: u32,
+    },
+    /// Let an arrow go from the bow in hand, drawn for this many ticks.
+    Shoot {
+        drawn: u8,
+    },
+    /// Raise or lower the shield in hand.
+    Guard(bool),
     Pong(u32),
 }
 
@@ -77,6 +94,8 @@ pub enum ClickButton {
 pub mod slots {
     /// The player's inventory: 0-8 is the hotbar, 9-35 the rest.
     pub const INVENTORY: u16 = 36;
+    /// The armour slots, from head to feet: four, starting here.
+    pub const ARMOR: u16 = 40;
     /// The open screen's own slots start here. Crafting: the grid, then the result.
     /// Furnace: input, fuel, output. Chest: its cells.
     pub const SCREEN: u16 = 100;
@@ -100,6 +119,8 @@ pub enum S2C {
     Inventory {
         slots: Vec<Option<ItemStack>>,
         selected: u8,
+        /// What is worn, from head to feet.
+        armor: [Option<ItemStack>; 4],
     },
     Cursor(Option<ItemStack>),
     /// The open screen, or none. Sent when it opens and whenever its contents change.
@@ -115,7 +136,15 @@ pub enum S2C {
     Players(Vec<PlayerEntry>),
     Ping(u32),
     Bye(String),
+    /// What signs say, for the signs in chunks this client watches.
+    Signs(Vec<(BlockPos, Vec<String>)>),
+    /// Write on the sign just placed.
+    EditSign(BlockPos),
 }
+
+/// How much a sign holds: lines, and characters on a line.
+pub const SIGN_LINES: usize = 4;
+pub const SIGN_LINE_LENGTH: usize = 18;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Welcome {
@@ -190,11 +219,24 @@ pub enum EntityKind {
     Chicken,
     Zombie,
     Skeleton,
+    /// A low, many-legged shell that climbs walls, out in the dark.
+    Gloomcrawler,
+    /// A pale, eyeless thing of the deep caves that keeps away from light.
+    Lurker,
+    /// A rowing boat, to ride on water.
+    Boat,
+    /// A cart, to ride along rails.
+    Cart,
+    /// A fishing float, out on its line.
+    Float,
 }
 
 impl EntityKind {
     pub const fn is_mob(self) -> bool {
-        matches!(self, Self::Sheep | Self::Pig | Self::Chicken | Self::Zombie | Self::Skeleton)
+        matches!(
+            self,
+            Self::Sheep | Self::Pig | Self::Chicken | Self::Zombie | Self::Skeleton | Self::Gloomcrawler | Self::Lurker
+        )
     }
     pub const fn name(self) -> &'static str {
         match self {
@@ -208,12 +250,32 @@ impl EntityKind {
             Self::Chicken => "chicken",
             Self::Zombie => "zombie",
             Self::Skeleton => "skeleton",
+            Self::Gloomcrawler => "gloomcrawler",
+            Self::Lurker => "lurker",
+            Self::Boat => "boat",
+            Self::Cart => "cart",
+            Self::Float => "float",
         }
     }
+    /// Whether it can be ridden.
+    pub const fn is_vehicle(self) -> bool {
+        matches!(self, Self::Boat | Self::Cart)
+    }
     pub fn from_name(name: &str) -> Option<Self> {
-        [Self::Sheep, Self::Pig, Self::Chicken, Self::Zombie, Self::Skeleton, Self::Tnt]
-            .into_iter()
-            .find(|k| k.name() == name)
+        [
+            Self::Sheep,
+            Self::Pig,
+            Self::Chicken,
+            Self::Zombie,
+            Self::Skeleton,
+            Self::Gloomcrawler,
+            Self::Lurker,
+            Self::Boat,
+            Self::Cart,
+            Self::Tnt,
+        ]
+        .into_iter()
+        .find(|k| k.name() == name)
     }
     /// Width and height.
     pub const fn size(self) -> (f64, f64) {
@@ -221,9 +283,13 @@ impl EntityKind {
             Self::Player | Self::Zombie | Self::Skeleton => (0.6, 1.8),
             Self::Item => (0.25, 0.25),
             Self::FallingBlock | Self::Tnt => (0.98, 0.98),
-            Self::Arrow => (0.2, 0.2),
+            Self::Arrow | Self::Float => (0.2, 0.2),
             Self::Sheep | Self::Pig => (0.9, 0.9),
             Self::Chicken => (0.4, 0.7),
+            Self::Gloomcrawler => (1.1, 0.6),
+            Self::Lurker => (0.6, 2.1),
+            Self::Boat => (1.4, 0.6),
+            Self::Cart => (0.98, 0.7),
         }
     }
 }
@@ -245,6 +311,10 @@ pub struct EntityInfo {
     pub stack: Option<ItemStack>,
     /// What a falling block is.
     pub block: BlockState,
+    /// A young animal, half grown.
+    pub baby: bool,
+    /// Whose it is, for a fishing float, whose line runs to them; 0 for anything else.
+    pub owner: u32,
 }
 
 /// How an entity moved since the last tick, in `POS_SCALE`ths of a block. Every viewer gets the
@@ -264,6 +334,17 @@ pub struct Vitals {
     /// Breath, 0-20.
     pub air: u8,
     pub mode: GameMode,
+    /// The food bar, 0-20. Full enough, and health comes back; empty, and it goes.
+    pub food: u8,
+    /// The armour worn, in points: each takes four per cent off a hit.
+    pub armor: u8,
+    /// Asleep in a bed, and so not moving.
+    pub sleeping: bool,
+    /// Experience: the level reached, and how far to the next, 0-255.
+    pub level: u16,
+    pub xp: u8,
+    /// The boat or cart this player rides, which moves them: the client stops guessing where it is.
+    pub riding: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,7 +393,6 @@ pub struct Effect {
 pub enum EffectKind {
     BlockBroken(BlockState),
     BlockPlaced(BlockState),
-    Step(BlockState),
     Hurt,
     Death,
     Explosion,
@@ -323,6 +403,12 @@ pub enum EffectKind {
     Fizz,
     Shoot,
     Open,
+    /// Two animals took to each other, or a young one was born.
+    Love,
+    /// A shield took a blow.
+    Blocked,
+    /// Someone reached a new level.
+    LevelUp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

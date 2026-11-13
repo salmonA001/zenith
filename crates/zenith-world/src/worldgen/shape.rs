@@ -136,6 +136,13 @@ impl Generator {
         Column { height, temperature, humidity, rugged: smoothstep(0.1, 0.6, range), river }
     }
 
+    /// Temperature and humidity alone: all a mesher needs for colours, and much cheaper than `column`.
+    pub fn climate(&self, x: f64, z: f64) -> (f64, f64) {
+        let t = (self.temp.get2(x / 1700.0, z / 1700.0) * 2.2).clamp(-1.0, 1.0);
+        let h = (self.humid.get2(x / 1300.0, z / 1300.0) * 2.2).clamp(-1.0, 1.0);
+        (t, h)
+    }
+
     /// Air gets colder the higher you go: this is the temperature at the surface of a column.
     pub fn surface_temperature(col: &Column) -> f64 {
         col.temperature - (col.height - SEA_LEVEL as f64).max(0.0) * 0.0105
@@ -206,7 +213,14 @@ fn to_rgb8(c: [f64; 3]) -> [u8; 3] {
     [c[0].clamp(0.0, 255.0) as u8, c[1].clamp(0.0, 255.0) as u8, c[2].clamp(0.0, 255.0) as u8]
 }
 
-fn climate_ramp(t: f64, w: f64, cold_dry: [f64; 3], cold_wet: [f64; 3], hot_dry: [f64; 3], hot_wet: [f64; 3]) -> [f64; 3] {
+fn climate_ramp(
+    t: f64,
+    w: f64,
+    cold_dry: [f64; 3],
+    cold_wet: [f64; 3],
+    hot_dry: [f64; 3],
+    hot_wet: [f64; 3],
+) -> [f64; 3] {
     let tt = (t * 0.5 + 0.5).clamp(0.0, 1.0);
     let ww = (w * 0.5 + 0.5).clamp(0.0, 1.0);
     mix3(mix3(cold_dry, cold_wet, ww), mix3(hot_dry, hot_wet, ww), tt)
@@ -261,7 +275,12 @@ impl Generator {
     /// A far-away column, using the same shape the real terrain follows. `slope` is the steepest
     /// height change per block around it, which the caller knows from its neighbours.
     pub fn far_sample(&self, x: f64, z: f64, slope: f64) -> FarSample {
-        let col = self.column(x, z);
+        Self::far_look(&self.column(x, z), slope)
+    }
+
+    /// `far_sample` for a column already known.
+    pub fn far_look(col: &Column, slope: f64) -> FarSample {
+        let col = *col;
         let biome = Self::biome(&col);
         let sea = SEA_LEVEL as f64;
         if col.height < sea {
@@ -277,7 +296,11 @@ impl Generator {
         let g = grass_tint(col.temperature, col.humidity);
         let f = foliage_tint(col.temperature, col.humidity);
         let wooded = |amount: f64| -> [u8; 3] {
-            to_rgb8(mix3([g[0] as f64, g[1] as f64, g[2] as f64], [f[0] as f64 * 0.72, f[1] as f64 * 0.72, f[2] as f64 * 0.72], amount))
+            to_rgb8(mix3(
+                [g[0] as f64, g[1] as f64, g[2] as f64],
+                [f[0] as f64 * 0.6, f[1] as f64 * 0.6, f[2] as f64 * 0.6],
+                amount,
+            ))
         };
         let (mut color, canopy) = match biome {
             Biome::Beach => ([222, 208, 164], 0.0),
@@ -293,7 +316,10 @@ impl Generator {
             Biome::SnowyPeaks => ([240, 244, 248], 0.0),
             Biome::River | Biome::Ocean | Biome::DeepOcean => ([150, 142, 116], 0.0),
         };
-        if matches!(biome, Biome::Mountains | Biome::SnowyPeaks) && slope < 0.6 && Self::surface_temperature(&col) < -0.72 {
+        if matches!(biome, Biome::Mountains | Biome::SnowyPeaks)
+            && slope < 0.6
+            && Self::surface_temperature(&col) < -0.72
+        {
             color = [240, 244, 248];
         } else if slope > 1.1 && !matches!(biome, Biome::Beach | Biome::Desert) {
             color = [116, 116, 118];

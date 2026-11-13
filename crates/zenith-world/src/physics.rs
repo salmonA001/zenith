@@ -161,8 +161,24 @@ fn slide(boxes: &[Aabb], mut b: Aabb, delta: DVec3) -> DVec3 {
     DVec3::new(dx, dy, dz)
 }
 
+/// Whether a body this big could stand with its feet at `feet` without being inside anything solid.
+pub fn fits(w: &impl BlockAccess, reg: &Registry, feet: DVec3, width: f64, height: f64, boxes: &mut Vec<Aabb>) -> bool {
+    let b = Aabb::standing(feet, width, height);
+    gather(w, reg, &b, boxes);
+    !boxes.iter().any(|o| o.intersects(&b))
+}
+
 /// Moves a body of any size by `delta` through the world. Used by everything that moves.
-pub fn move_body(w: &impl BlockAccess, reg: &Registry, body: &mut Body, delta: DVec3, width: f64, height: f64, can_step: bool, boxes: &mut Vec<Aabb>) {
+pub fn move_body(
+    w: &impl BlockAccess,
+    reg: &Registry,
+    body: &mut Body,
+    delta: DVec3,
+    width: f64,
+    height: f64,
+    can_step: bool,
+    boxes: &mut Vec<Aabb>,
+) {
     let b = body.aabb(width, height);
     gather(w, reg, &b.swept(delta).inflate(STEP_UP + 0.01), boxes);
     let mut applied = slide(boxes, b, delta);
@@ -209,7 +225,13 @@ pub fn sense(w: &impl BlockAccess, reg: &Registry, body: &mut Body, height: f64)
 }
 
 /// One tick of a player. `boxes` is a buffer kept between calls.
-pub fn step(body: &mut Body, input: MoveInput, w: &impl BlockAccess, reg: &Registry, boxes: &mut Vec<Aabb>) -> StepResult {
+pub fn step(
+    body: &mut Body,
+    input: MoveInput,
+    w: &impl BlockAccess,
+    reg: &Registry,
+    boxes: &mut Vec<Aabb>,
+) -> StepResult {
     // No ground has arrived under this body yet: hold still until it does.
     let here = BlockPos::from_vec(body.pos);
     if !w.is_loaded(here) || !w.is_loaded(here.add(1, 0, 1)) || !w.is_loaded(here.add(-1, 0, -1)) {
@@ -256,7 +278,10 @@ pub fn step(body: &mut Body, input: MoveInput, w: &impl BlockAccess, reg: &Regis
         let delta = body.vel;
         move_body(w, reg, body, delta, PLAYER_WIDTH, PLAYER_HEIGHT, true, boxes);
         // Climbing out over the edge of a pool.
-        if keys.has(Keys::JUMP) && (body.pos.x != start.x + delta.x || body.pos.z != start.z + delta.z) && !body.eyes_in_water {
+        if keys.has(Keys::JUMP)
+            && (body.pos.x != start.x + delta.x || body.pos.z != start.z + delta.z)
+            && !body.eyes_in_water
+        {
             body.vel.y = 0.3;
         }
         body.fall = 0.0;
@@ -286,7 +311,13 @@ pub fn step(body: &mut Body, input: MoveInput, w: &impl BlockAccess, reg: &Regis
 
     if body.climbing {
         let climbing_up = keys.has(Keys::JUMP) || forward != 0;
-        body.vel.y = if climbing_up { CLIMB_SPEED } else if keys.has(Keys::SNEAK) { 0.0 } else { -CLIMB_SPEED };
+        body.vel.y = if climbing_up {
+            CLIMB_SPEED
+        } else if keys.has(Keys::SNEAK) {
+            0.0
+        } else {
+            -CLIMB_SPEED
+        };
         delta.y = body.vel.y;
         delta.x = delta.x.clamp(-0.15, 0.15);
         delta.z = delta.z.clamp(-0.15, 0.15);

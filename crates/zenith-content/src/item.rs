@@ -19,9 +19,41 @@ pub enum ItemKind {
         /// How much faster than bare hands on a block it suits.
         speed: u8,
     },
-    Food {
-        heal: u8,
+    /// Eaten, it fills this many points of the food bar.
+    Food { heal: u8 },
+    /// Worn in an armour slot: 0 head, 1 body, 2 legs, 3 feet.
+    Armor {
+        slot: u8,
+        /// How much it takes off a hit: each point is four per cent.
+        points: u8,
+        durability: u16,
     },
+    /// Draws and shoots arrows.
+    Bow { durability: u16 },
+    /// Held up, it takes blows from the front.
+    Shield { durability: u16 },
+    /// Carries a fluid: the block kind it holds, or 0 while empty. Empty, it scoops up the spring
+    /// it is pointed at; full, it pours one out.
+    Bucket { holds: u16 },
+    /// A fishing rod: casts a float onto water, and pulls in what bites.
+    Rod { durability: u16 },
+    /// Strikes a spark: lights a fire where it is used.
+    Lighter { durability: u16 },
+}
+
+impl ItemKind {
+    /// How many uses it has in it, for things that wear out.
+    pub const fn durability(self) -> Option<u16> {
+        match self {
+            Self::Tool { durability, .. }
+            | Self::Armor { durability, .. }
+            | Self::Bow { durability }
+            | Self::Shield { durability }
+            | Self::Rod { durability }
+            | Self::Lighter { durability } => Some(durability),
+            _ => None,
+        }
+    }
 }
 
 /// How to draw an item that is not a block.
@@ -39,6 +71,28 @@ pub enum Icon {
     Apple,
     Meat([u8; 3]),
     Brick,
+    Seeds([u8; 3]),
+    /// A bundle of cut grain.
+    Sheaf([u8; 3]),
+    Bread,
+    /// A piece of armour for a slot (0 head to 3 feet), in a colour.
+    Armor(u8, [u8; 3]),
+    Arrow,
+    Bow,
+    Shield([u8; 3]),
+    Feather,
+    /// A coil of tough fibre.
+    Sinew,
+    Boat([u8; 3]),
+    Cart,
+    /// A pail, and the colour of what is in it, if anything.
+    Bucket(Option<[u8; 3]>),
+    /// A fishing rod and its line.
+    Rod,
+    /// A fish, in its colour.
+    Fish([u8; 3]),
+    /// A tinderbox: a small tin, and a spark over it.
+    Tinderbox,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

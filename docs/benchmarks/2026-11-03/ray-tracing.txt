@@ -1,0 +1,27 @@
+tools/bench-client.sh 16 32, then BENCH_FLAGS=--ray-tracing tools/bench-client.sh 16 32. Release build,
+1920x1080, no window, frame rate uncapped. The machine was also running a video call, a game and an
+animated wallpaper, all drawing on the same GPU.
+
+Ray tracing off:
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 | 2.3 s | 242 | 4.17 | 14.85 | 1.70 | 1818 | 333051 | 83 |
+| 32 | 4.3 s | 176 | 5.72 | 8.43 | 3.02 | 7032 | 1460236 | 360 |
+
+Ray tracing on (every section within 16 chunks traced, nothing waiting):
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 | 2.5 s | 236 | 4.25 | 13.70 | 1.30 | 1818 | 333051 | 83 |
+| 32 | 3.6 s | 232 | 4.34 | 6.43 | 2.23 | 7032 | 1460236 | 360 |
+
+The first version rebuilt the top-level structure every frame, relative to the camera, and cost about
+2 ms of CPU time a frame: 187 fps against 236 at view distance 16, and 132 against 185 at 32. Placing
+sections around an anchor that seldom moves, each in a slot of its own, means the top level is rebuilt
+only when sections come, go or change.
+
+Stress run at view distance 12 (scratch script, not kept): breaking a block rebuilt its section in
+place; teleports of 5,000 and 8,000 blocks, which move the anchor, streamed every section out and in
+again with nothing left waiting; turning the option off and on in the pause menu let everything go
+and built it all again. No wgpu validation errors.

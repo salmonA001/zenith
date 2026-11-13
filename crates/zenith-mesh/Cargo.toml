@@ -1,0 +1,16 @@
+[package]
+name = "zenith-mesh"
+description = "Turns chunks into triangles. CPU only: testable and benchmarkable with no GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+zenith-content = { path = "../zenith-content" }
+zenith-core = { path = "../zenith-core" }
+zenith-world = { path = "../zenith-world" }
+
+[lints]
+workspace = true

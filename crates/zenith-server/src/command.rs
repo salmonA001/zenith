@@ -1,14 +1,14 @@
 //! Chat commands, from a player or the server console.
 use crate::Server;
 use crate::rules;
-use zenith_content::{BlockState, ItemStack};
-use zenith_core::glam::DVec3;
+use zenith_content::{BlockState, ItemStack, id};
 use zenith_core::BlockPos;
+use zenith_core::glam::DVec3;
 use zenith_protocol::{EntityKind, GameMode};
 
 const HELP: &str = "/help /list /seed /tps /time set <day|night|noon|midnight|ticks> /weather <clear|rain> \
 /gamemode <survival|creative> /give <item> [count] /tp <x y z | player> /spawn /setspawn /kill \
-/setblock <x y z block> /fill <x1 y1 z1 x2 y2 z2 block> /summon <mob> [count] /save /say <text> /op <name> \
+/setblock <x y z block[:state]> /fill <x1 y1 z1 x2 y2 z2 block[:state]> /summon <mob> [count] /save /say <text> /op <name> \
 /deop <name> /kick <name>";
 
 /// Most blocks one `/fill` may touch.
@@ -174,15 +174,30 @@ fn tp(server: &mut Server, sender: Sender, args: &[&str]) -> Result<Vec<String>,
             let n = |s: &str| s.parse::<f64>().map_err(|_| format!("{s} is not a number."));
             DVec3::new(n(x)?, n(y)?, n(z)?)
         }
-        [name] => server.players.iter().find(|p| p.name == *name).map(|p| p.body.pos).ok_or_else(|| format!("{name} is not here."))?,
+        [name] => server
+            .players
+            .iter()
+            .find(|p| p.name == *name)
+            .map(|p| p.body.pos)
+            .ok_or_else(|| format!("{name} is not here."))?,
         _ => return Err("/tp <x y z | player>".into()),
     };
     server.teleport(i, at);
     Ok(vec![format!("Teleported to {:.1} {:.1} {:.1}.", at.x, at.y, at.z)])
 }
 
+/// A block by name, with its state after a colon if one is given: `grain_crop:7`.
 fn block_state(server: &Server, name: &str) -> Result<BlockState, String> {
-    server.world.reg.block_by_name(name).map(BlockState::of).ok_or_else(|| format!("There is no block called {name}."))
+    let (name, meta) = match name.split_once(':') {
+        Some((name, meta)) => {
+            let meta =
+                meta.parse::<u8>().ok().filter(|&m| m < 16).ok_or(format!("{meta} is not a state from 0 to 15."))?;
+            (name, meta)
+        }
+        None => (name, 0),
+    };
+    let kind = server.world.reg.block_by_name(name).ok_or_else(|| format!("There is no block called {name}."))?;
+    Ok(BlockState::new(kind, meta))
 }
 
 fn int(s: &str) -> Result<i32, String> {
@@ -196,6 +211,18 @@ fn setblock(server: &mut Server, args: &[&str]) -> Result<Vec<String>, String> {
     if !server.world.set(p, state) {
         return Err("Nothing changed: is that chunk loaded?".into());
     }
+    // Half a bed or a door cannot be: the other half comes with it.
+    let toward = crate::player::bed_toward(state.meta());
+    let (up, down) = (zenith_core::Dir::Up, zenith_core::Dir::Down);
+    match state.kind() {
+        id::BED => server.world.set(p.offset(toward), BlockState::new(id::BED_HEAD, state.meta())),
+        id::BED_HEAD => server.world.set(p.offset(toward.opposite()), BlockState::new(id::BED, state.meta())),
+        id::DOOR if state.meta() & 8 == 0 => {
+            server.world.set(p.offset(up), BlockState::new(id::DOOR, state.meta() | 8))
+        }
+        id::DOOR => server.world.set(p.offset(down), BlockState::new(id::DOOR, state.meta() & 7)),
+        _ => false,
+    };
     rules::drain_updates(&mut server.world);
     Ok(vec![format!("Set {name} at {} {} {}.", p.x, p.y, p.z)])
 }
@@ -226,12 +253,15 @@ fn summon(server: &mut Server, sender: Sender, args: &[&str]) -> Result<Vec<Stri
     let i = sender.ok_or("Only a player stands somewhere.")?;
     let name = *args.first().ok_or("/summon <mob> [count]")?;
     let kind = EntityKind::from_name(name).ok_or_else(|| format!("There is no mob called {name}."))?;
-    let count = args.get(1).map_or(Ok(1), |c| c.parse::<u32>()).map_err(|_| "That is not a number.".to_string())?.min(64);
+    let count =
+        args.get(1).map_or(Ok(1), |c| c.parse::<u32>()).map_err(|_| "That is not a number.".to_string())?.min(64);
     let at = server.players[i].body.pos + server.players[i].last_input.look() * 3.0 + DVec3::Y;
     for n in 0..count {
         let spread = DVec3::new((n % 8) as f64 - 4.0, 0.0, (n / 8) as f64) * 0.5;
         if kind == EntityKind::Tnt {
             server.entities.spawn(kind, at + spread, crate::entity::Data::Tnt { fuse: 60 });
+        } else if kind.is_vehicle() {
+            server.entities.spawn_vehicle(&server.world, kind, at + spread);
         } else {
             server.entities.spawn_mob(kind, at + spread);
         }

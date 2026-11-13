@@ -12,14 +12,14 @@
 //!   the same inputs, so correcting a client is rare and cheating at movement is not possible.
 
 pub mod chunk;
-pub mod worldgen;
 pub mod light;
 pub mod path;
 pub mod physics;
 pub mod pick;
 pub mod store;
+pub mod worldgen;
 
 pub use chunk::{BlockAccess, Chunk, ChunkMap};
-pub use worldgen::{Biome, GENERATOR_VERSION, Generator};
 pub use physics::{Body, Keys, MoveInput};
 pub use store::RegionStore;
+pub use worldgen::{Biome, GENERATOR_VERSION, Generator};

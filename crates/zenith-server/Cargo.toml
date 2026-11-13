@@ -17,6 +17,7 @@ serde_json.workspace = true
 lz4_flex.workspace = true
 zenith-content = { path = "../zenith-content" }
 zenith-core = { path = "../zenith-core" }
+zenith-mods = { path = "../zenith-mods" }
 zenith-protocol = { path = "../zenith-protocol" }
 zenith-world = { path = "../zenith-world" }
 

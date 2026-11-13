@@ -22,14 +22,55 @@ const REACH: f64 = 5.0;
 const EVENT_LOG: usize = 500;
 
 enum Task {
-    WaitReady { until: Instant },
-    Goto { goal: DVec3, near: f64, until: Instant, sprint: bool, route: Vec<BlockPos>, at: usize, replan_in: u32, stuck: u32, last: DVec3, then: Option<Box<Task>> },
-    Walk { keys: u8, until: Instant },
-    Jump { left_ground: bool, until: Instant },
-    Break { pos: BlockPos, before: BlockState, until: Instant, started: bool, gained_from: u64 },
-    Attack { entity: u32, until: Instant },
+    WaitReady {
+        until: Instant,
+    },
+    Goto {
+        goal: DVec3,
+        near: f64,
+        until: Instant,
+        sprint: bool,
+        route: Vec<BlockPos>,
+        at: usize,
+        replan_in: u32,
+        stuck: u32,
+        last: DVec3,
+        then: Option<Box<Task>>,
+    },
+    Walk {
+        keys: u8,
+        until: Instant,
+    },
+    Jump {
+        left_ground: bool,
+        until: Instant,
+    },
+    Break {
+        pos: BlockPos,
+        before: BlockState,
+        until: Instant,
+        started: bool,
+        gained_from: u64,
+    },
+    Place {
+        pos: BlockPos,
+        kind: u16,
+        until: Instant,
+    },
+    Attack {
+        entity: u32,
+        until: Instant,
+    },
+    /// Holding food to the mouth until one is gone.
+    Eat {
+        item: u16,
+        had: u32,
+        until: Instant,
+    },
     Craft(Box<CraftJob>),
-    Respawn { until: Instant },
+    Respawn {
+        until: Instant,
+    },
 }
 
 struct CraftJob {
@@ -79,7 +120,15 @@ fn yaw_pitch_towards(from: DVec3, to: DVec3) -> (u16, i16) {
 
 impl Agent {
     pub fn new(session: Session) -> Self {
-        Self { yaw: 0, pitch: 0, tasks: VecDeque::new(), log: VecDeque::new(), next_event: 1, quit_requested: false, session }
+        Self {
+            yaw: 0,
+            pitch: 0,
+            tasks: VecDeque::new(),
+            log: VecDeque::new(),
+            next_event: 1,
+            quit_requested: false,
+            session,
+        }
     }
 
     /// Whether commands are moving the player right now. A window lets go of the keyboard then.
@@ -189,7 +238,12 @@ impl Agent {
             Task::Break { pos, before, until, started, gained_from } => {
                 let (pos, before, gained_from) = (*pos, *before, *gained_from);
                 if self.session.block(pos) != before {
-                    let gained: Vec<Value> = self.log.iter().filter(|l| l.seq >= gained_from && l.value["type"] == "item_gained").map(|l| l.value.clone()).collect();
+                    let gained: Vec<Value> = self
+                        .log
+                        .iter()
+                        .filter(|l| l.seq >= gained_from && l.value["type"] == "item_gained")
+                        .map(|l| l.value.clone())
+                        .collect();
                     return Some(ok(json!({ "broken": self.session.reg.block(before).name, "gained": gained })));
                 }
                 if Instant::now() > *until {
@@ -202,6 +256,15 @@ impl Agent {
                     self.session.dig(pos, Dir::Up as u8);
                 }
                 None
+            }
+            // Replying only once the server has said so: whoever asked may look straight away.
+            Task::Place { pos, kind, until } => {
+                if self.session.block(*pos).kind() == *kind {
+                    return Some(ok(
+                        json!({ "placed": self.session.reg.block(BlockState::of(*kind)).name, "at": [pos.x, pos.y, pos.z] }),
+                    ));
+                }
+                (Instant::now() > *until).then(|| err("it did not go there: something may be in the way"))
             }
             Task::Attack { entity, until } => {
                 let id = *entity;
@@ -221,6 +284,19 @@ impl Agent {
                 self.session.send(&C2S::Attack { entity: id });
                 Some(ok(json!({ "attacked": id })))
             }
+            Task::Eat { item, had, until } => {
+                let left: u32 =
+                    self.session.inventory.iter().flatten().filter(|s| s.item == *item).map(|s| s.count as u32).sum();
+                if left < *had {
+                    let name = self.session.reg.item(*item).map(|d| d.name.clone());
+                    return Some(ok(json!({ "ate": name, "food": self.session.food })));
+                }
+                if Instant::now() > *until {
+                    return Some(err("could not eat it: a full stomach takes nothing"));
+                }
+                self.session.send(&C2S::UseItem);
+                None
+            }
             Task::Craft(job) => self.run_craft(job),
             Task::Respawn { until } => {
                 if self.session.health > 0 {
@@ -232,7 +308,9 @@ impl Agent {
     }
 
     fn run_goto(&mut self, task: &mut Task, keys: &mut u8) -> Option<Value> {
-        let Task::Goto { goal, near, until, sprint, route, at, replan_in, stuck, last, then } = task else { return None };
+        let Task::Goto { goal, near, until, sprint, route, at, replan_in, stuck, last, then } = task else {
+            return None;
+        };
         let pos = self.session.body.pos;
         let arrived = pos.distance(*goal) <= *near;
         if arrived {
@@ -280,7 +358,7 @@ impl Agent {
                 break;
             }
         }
-        let Some(&w) = route.get(*at) else { return None };
+        let &w = route.get(*at)?;
         let c = DVec3::new(w.x as f64 + 0.5, w.y as f64, w.z as f64 + 0.5);
         let (yaw, _) = yaw_pitch_towards(pos, c);
         self.yaw = yaw;
@@ -420,7 +498,7 @@ impl Agent {
             }
         }
         if spec.needs_gpu {
-            let _ = reply.send(err("this needs the windowed game; a headless agent has no screen to capture"));
+            let _ = reply.send(err("this needs the game itself; a headless player has no screen"));
             return;
         }
         match self.dispatch(spec.name, args, &reply) {
@@ -433,11 +511,17 @@ impl Agent {
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, reply: &Reply) -> Result<Option<Task>, String> {
-        let int = |key: &str| a.get(key).and_then(Value::as_i64).map(|v| v as i32).ok_or_else(|| format!("{key} must be a whole number"));
+        let int = |key: &str| {
+            a.get(key).and_then(Value::as_i64).map(|v| v as i32).ok_or_else(|| format!("{key} must be a whole number"))
+        };
         let num = |key: &str| a.get(key).and_then(Value::as_f64).ok_or_else(|| format!("{key} must be a number"));
-        let text = |key: &str| a.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("{key} must be text"));
+        let text = |key: &str| {
+            a.get(key).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("{key} must be text"))
+        };
         let flag = |key: &str| a.get(key).and_then(Value::as_bool).unwrap_or(false);
-        let seconds = |key: &str, default: f64| Duration::from_secs_f64(a.get(key).and_then(Value::as_f64).unwrap_or(default).clamp(0.0, 3600.0));
+        let seconds = |key: &str, default: f64| {
+            Duration::from_secs_f64(a.get(key).and_then(Value::as_f64).unwrap_or(default).clamp(0.0, 3600.0))
+        };
         let answer = |value: Value| {
             let _ = reply.send(ok(value));
         };
@@ -453,7 +537,9 @@ impl Agent {
                 let s = self.session.block(p);
                 answer(json!({ "name": self.session.reg.block(s).name, "state": s.meta() }));
             }
-            "blocks" => answer(self.blocks_in(int("x1")?, int("y1")?, int("z1")?, int("x2")?, int("y2")?, int("z2")?)?),
+            "blocks" => {
+                answer(self.blocks_in(int("x1")?, int("y1")?, int("z1")?, int("x2")?, int("y2")?, int("z2")?)?)
+            }
             "find_block" => {
                 let radius = a.get("radius").and_then(Value::as_i64).unwrap_or(32).clamp(1, 96) as i32;
                 answer(self.find_block(&text("block")?, radius)?);
@@ -480,13 +566,27 @@ impl Agent {
             }
             "messages" => {
                 let n = a.get("n").and_then(Value::as_u64).unwrap_or(20) as usize;
-                let lines: Vec<Value> = self.session.chat.iter().rev().take(n).rev().map(|l| json!({"from": l.from, "text": l.text})).collect();
+                let lines: Vec<Value> = self
+                    .session
+                    .chat
+                    .iter()
+                    .rev()
+                    .take(n)
+                    .rev()
+                    .map(|l| json!({"from": l.from, "text": l.text}))
+                    .collect();
                 answer(json!({ "messages": lines }));
             }
             "wait_ready" => return Ok(Some(Task::WaitReady { until: Instant::now() + seconds("seconds", 60.0) })),
             "goto" => {
                 let goal = DVec3::new(num("x")?, num("y")?, num("z")?);
-                return Ok(Some(self.goto_task(goal, a.get("near").and_then(Value::as_f64).unwrap_or(1.0), seconds("timeout", 60.0), flag("sprint"), None)));
+                return Ok(Some(self.goto_task(
+                    goal,
+                    a.get("near").and_then(Value::as_f64).unwrap_or(1.0),
+                    seconds("timeout", 60.0),
+                    flag("sprint"),
+                    None,
+                )));
             }
             "walk" => {
                 let mut keys = match text("direction")?.as_str() {
@@ -504,7 +604,9 @@ impl Agent {
                 }
                 return Ok(Some(Task::Walk { keys, until: Instant::now() + seconds("seconds", 1.0) }));
             }
-            "jump" => return Ok(Some(Task::Jump { left_ground: false, until: Instant::now() + Duration::from_secs(5) })),
+            "jump" => {
+                return Ok(Some(Task::Jump { left_ground: false, until: Instant::now() + Duration::from_secs(5) }));
+            }
             "look" => {
                 self.yaw = dmath::deg_to_turn(num("yaw")?);
                 self.pitch = (num("pitch")?.clamp(-90.0, 90.0) * 65536.0 / 360.0) as i16;
@@ -514,6 +616,15 @@ impl Agent {
                 self.face_towards(DVec3::new(num("x")?, num("y")?, num("z")?));
                 answer(self.state());
             }
+            "fly" => {
+                if self.session.mode != GameMode::Creative {
+                    return Err("flying is for creative mode".into());
+                }
+                let on = !flag("off");
+                self.session.body.flying = on;
+                self.session.send(&C2S::SetFlying(on));
+                answer(self.state());
+            }
             "break" => {
                 let pos = block_pos()?;
                 let before = self.session.block(pos);
@@ -521,17 +632,22 @@ impl Agent {
                     return Err("there is nothing there".into());
                 }
                 let reg = self.session.reg.clone();
-                let ticks = reg.dig_ticks(before, self.session.held().map(|s| s.item)).ok_or("that cannot be broken")?;
+                let ticks =
+                    reg.dig_ticks(before, self.session.held().map(|s| s.item)).ok_or("that cannot be broken")?;
                 let limit = Duration::from_secs_f64((ticks as f64 / 20.0 + 5.0).max(5.0));
-                let dig = Task::Break { pos, before, until: Instant::now() + limit, started: false, gained_from: self.next_event };
+                let dig = Task::Break {
+                    pos,
+                    before,
+                    until: Instant::now() + limit,
+                    started: false,
+                    gained_from: self.next_event,
+                };
                 if self.eye().distance(pos.center()) <= REACH {
                     return Ok(Some(dig));
                 }
                 return Ok(Some(self.goto_task(pos.center(), REACH - 1.0, Duration::from_secs(60), false, Some(dig))));
             }
-            "place" => {
-                self.place(block_pos()?, &text("item")?, reply)?;
-            }
+            "place" => return self.place(block_pos()?, &text("item")?).map(Some),
             "interact" => {
                 let pos = block_pos()?;
                 self.face_towards(pos.center());
@@ -541,12 +657,16 @@ impl Agent {
             "eat" => {
                 let reg = self.session.reg.clone();
                 let food = (0..9).find(|&i| {
-                    self.session.inventory[i].is_some_and(|s| matches!(reg.item(s.item).map(|d| d.kind), Some(ItemKind::Food { .. })))
+                    self.session.inventory[i]
+                        .is_some_and(|s| matches!(reg.item(s.item).map(|d| d.kind), Some(ItemKind::Food { .. })))
                 });
                 let Some(slot) = food else { return Err("no food in the hotbar".into()) };
                 self.session.send(&C2S::SelectSlot(slot as u8));
-                self.session.send(&C2S::UseItem);
-                answer(json!({ "ate": reg.item(self.session.inventory[slot].map_or(0, |s| s.item)).map(|d| d.name.clone()) }));
+                self.session.selected = slot as u8;
+                let item = self.session.inventory[slot].map_or(0, |s| s.item);
+                let had: u32 =
+                    self.session.inventory.iter().flatten().filter(|s| s.item == item).map(|s| s.count as u32).sum();
+                return Ok(Some(Task::Eat { item, had, until: Instant::now() + Duration::from_secs(4) }));
             }
             "attack" => {
                 let entity = int("entity")? as u32;
@@ -554,6 +674,10 @@ impl Agent {
                     return Err("no such entity nearby".into());
                 }
                 return Ok(Some(Task::Attack { entity, until: Instant::now() + Duration::from_secs(20) }));
+            }
+            "use" => {
+                self.session.send(&C2S::UseItem);
+                answer(json!({ "used": true }));
             }
             "select" => {
                 let slot = int("slot")?;
@@ -569,7 +693,11 @@ impl Agent {
             }
             "craft" => {
                 let item_name = text("item")?;
-                let item = self.session.reg.item_by_name(&item_name).ok_or_else(|| format!("there is no item called {item_name}"))?;
+                let item = self
+                    .session
+                    .reg
+                    .item_by_name(&item_name)
+                    .ok_or_else(|| format!("there is no item called {item_name}"))?;
                 let times = a.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 64) as u32;
                 return self.start_craft(item, times).map(Some);
             }
@@ -654,7 +782,9 @@ impl Agent {
             for dz in -4..=4 {
                 for dx in -4..=4 {
                     let p = at.add(dx, dy, dz);
-                    if self.session.block(p).kind() == zenith_content::id::BENCH && self.eye().distance(p.center()) <= REACH {
+                    if self.session.block(p).kind() == zenith_content::id::BENCH
+                        && self.eye().distance(p.center()) <= REACH
+                    {
                         return Some(p);
                     }
                 }
@@ -663,7 +793,7 @@ impl Agent {
         None
     }
 
-    fn place(&mut self, pos: BlockPos, item_name: &str, reply: &Reply) -> Result<(), String> {
+    fn place(&mut self, pos: BlockPos, item_name: &str) -> Result<Task, String> {
         let reg = self.session.reg.clone();
         let item = reg.item_by_name(item_name).ok_or_else(|| format!("there is no item called {item_name}"))?;
         let ItemKind::Block(kind) = reg.item(item).map_or(ItemKind::Material, |d| d.kind) else {
@@ -682,7 +812,8 @@ impl Agent {
         }
         // Against the first neighbour that is there: below first, as that suits nearly everything.
         let order = [Dir::Down, Dir::North, Dir::South, Dir::West, Dir::East, Dir::Up];
-        let support = order.iter().copied().find(|&d| reg.lut.collides[self.session.block(pos.offset(d)).kind() as usize]);
+        let support =
+            order.iter().copied().find(|&d| reg.lut.collides[self.session.block(pos.offset(d)).kind() as usize]);
         let Some(d) = support else { return Err("nothing next to that position to build against".into()) };
         // A shape that hangs from something needs that side, not just any.
         let shape = reg.block(BlockState::of(kind)).shape;
@@ -691,8 +822,7 @@ impl Agent {
         }
         self.face_towards(pos.center());
         self.session.send(&C2S::UseOn { pos: pos.offset(d), face: d.opposite() as u8 });
-        let _ = reply.send(ok(json!({ "placing": item_name, "at": [pos.x, pos.y, pos.z] })));
-        Ok(())
+        Ok(Task::Place { pos, kind, until: Instant::now() + Duration::from_secs(2) })
     }
 
     /// The player, the world and the crosshair in one value.
@@ -714,6 +844,9 @@ impl Agent {
             "pitch": self.pitch as f64 * 360.0 / 65536.0,
             "health": s.health,
             "air": s.air,
+            "food": s.food,
+            "armor": s.armor_points,
+            "sleeping": s.sleeping,
             "mode": format!("{:?}", s.mode),
             "selected": s.selected,
             "held": s.held().map(|h| s.reg.item(h.item).map_or("?", |d| d.name.as_str()).to_string()),
@@ -835,7 +968,12 @@ mod tests {
 
     #[test]
     fn aiming_agrees_with_where_physics_looks() {
-        for target in [DVec3::new(0.0, 0.0, 5.0), DVec3::new(5.0, 2.0, 0.0), DVec3::new(-3.0, -4.0, -3.0), DVec3::new(0.0, 5.0, 0.01)] {
+        for target in [
+            DVec3::new(0.0, 0.0, 5.0),
+            DVec3::new(5.0, 2.0, 0.0),
+            DVec3::new(-3.0, -4.0, -3.0),
+            DVec3::new(0.0, 5.0, 0.01),
+        ] {
             let (yaw, pitch) = yaw_pitch_towards(DVec3::ZERO, target);
             let look = MoveInput { keys: Keys(0), yaw, pitch }.look();
             assert!(look.dot(target.normalize()) > 0.999, "{target}: looked along {look}");

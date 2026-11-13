@@ -16,6 +16,10 @@ pub struct Pack {
     pub smelts: Vec<SmeltDef>,
 }
 
+/// The most a registry can hold: enough for any real pack, and little enough to read from a stranger.
+const MAX_ITEMS: usize = 32768;
+const MAX_TILES: usize = 4096;
+
 /// Which numbers a world has already given to pack content, so that saves stay valid when packs
 /// are added, removed or reordered.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,14 +205,18 @@ impl Registry {
         let mut block_items = vec![None; data.blocks.len()];
         let mut tag_names: HashMap<String, u16> = HashMap::new();
         let mut item_tags = Vec::with_capacity(data.items.len());
+        if data.items.len() > MAX_ITEMS {
+            return Err(format!("more than {MAX_ITEMS} items"));
+        }
         for (i, item) in data.items.iter().enumerate() {
             if item_names.insert(item.name.clone(), i as u16).is_some() {
                 return Err(format!("item {} defined twice", item.name));
             }
             if let ItemKind::Block(kind) = item.kind {
-                if let Some(slot) = block_items.get_mut(kind as usize) {
-                    *slot = Some(i as u16);
-                }
+                let slot = block_items
+                    .get_mut(kind as usize)
+                    .ok_or_else(|| format!("item {} places a block that does not exist", item.name))?;
+                *slot = Some(i as u16);
             }
             let tags: Vec<u16> = item
                 .tags
@@ -224,7 +232,9 @@ impl Registry {
         let find_item = |name: &str| item_names.get(name).copied().ok_or_else(|| format!("unknown item {name}"));
         let ingredient = |name: &str| -> Result<Ingredient, String> {
             match name.strip_prefix('#') {
-                Some(tag) => tag_names.get(tag).map(|&t| Ingredient::Tag(t)).ok_or_else(|| format!("unknown tag {tag}")),
+                Some(tag) => {
+                    tag_names.get(tag).map(|&t| Ingredient::Tag(t)).ok_or_else(|| format!("unknown tag {tag}"))
+                }
                 None => find_item(name).map(Ingredient::Item),
             }
         };
@@ -243,7 +253,8 @@ impl Registry {
                     match chars.next() {
                         None | Some(' ') => cells.push(None),
                         Some(c) => {
-                            let name = def.key.get(&c).ok_or_else(|| format!("recipe for {}: no key for {c:?}", def.out))?;
+                            let name =
+                                def.key.get(&c).ok_or_else(|| format!("recipe for {}: no key for {c:?}", def.out))?;
                             cells.push(Some(ingredient(name)?));
                         }
                     }
@@ -260,7 +271,16 @@ impl Registry {
             smelts.insert(find_item(&s.input)?, find_item(&s.output)?);
         }
 
-        // Identical descriptions share a texture layer.
+        // Identical descriptions share a texture layer. Each one has to be painted, so a registry
+        // does not get to ask for an unlimited number.
+        let distinct: std::collections::HashSet<Tex> = data
+            .blocks
+            .iter()
+            .flat_map(|b| [b.tex.top, b.tex.bottom, b.tex.side].into_iter().chain(b.tex.front))
+            .collect();
+        if distinct.len() > MAX_TILES {
+            return Err(format!("more than {MAX_TILES} textures"));
+        }
         let mut tiles: Vec<Tex> = Vec::new();
         let mut tile_index: HashMap<Tex, u16> = HashMap::new();
         let mut layer = |t: Tex| -> u16 {
@@ -466,6 +486,33 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_from_a_stranger_cannot_point_an_item_at_a_block_that_is_not_there() {
+        let mut data = Registry::builtin().data.clone();
+        let bad = data.blocks.len() as u16 + 5;
+        data.items[0].kind = ItemKind::Block(bad);
+        let bytes = postcard::to_stdvec(&data).expect("serialises");
+        let err = Registry::from_bytes(&bytes).err().expect("refused");
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn a_registry_cannot_ask_for_endless_textures() {
+        let mut data = Registry::builtin().data.clone();
+        let template = data.blocks[1].clone();
+        for i in 0..1400u32 {
+            let mut b = template.clone();
+            b.name = format!("many{i}");
+            b.tex.top.seed = i * 3;
+            b.tex.bottom.seed = i * 3 + 1;
+            b.tex.side.seed = i * 3 + 2;
+            data.blocks.push(b);
+        }
+        let bytes = postcard::to_stdvec(&data).expect("serialises");
+        let err = Registry::from_bytes(&bytes).err().expect("refused");
+        assert!(err.contains("textures"), "{err}");
+    }
+
+    #[test]
     fn fixed_block_numbers_match_their_names() {
         // These numbers are in saved worlds.
         let reg = Registry::builtin();
@@ -540,7 +587,9 @@ mod tests {
     fn every_tool_tier_can_be_crafted_from_its_material() {
         let reg = Registry::builtin();
         let stick = Some(item(&reg, "stick"));
-        for (material, head) in [("wood", "oak_planks"), ("stone", "cobble"), ("iron", "iron_ingot"), ("crystal", "crystal")] {
+        for (material, head) in
+            [("wood", "oak_planks"), ("stone", "cobble"), ("iron", "iron_ingot"), ("crystal", "crystal")]
+        {
             let h = Some(item(&reg, head));
             let grid = [h, h, h, None, stick, None, None, stick, None];
             assert_eq!(reg.craft(&grid, 3).map(|c| c.item), Some(item(&reg, &format!("{material}_pick"))));
@@ -580,7 +629,8 @@ mod tests {
 
     #[test]
     fn pack_blocks_keep_their_numbers_when_packs_are_reordered_or_removed() {
-        let first = Registry::build(&[pack("a", &["amber"]), pack("b", &["basalt"])], &Stable::default()).expect("builds");
+        let first =
+            Registry::build(&[pack("a", &["amber"]), pack("b", &["basalt"])], &Stable::default()).expect("builds");
         let amber = first.block_by_name("amber").expect("amber");
         let basalt = first.block_by_name("basalt").expect("basalt");
         assert_eq!(amber, id::FIRST_PACK);

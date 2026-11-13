@@ -1,0 +1,22 @@
+[package]
+name = "zenith-ctl"
+description = "Drive Zenith from a script or an AI: a command line, an MCP server, and a player with no window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zenith-ctl"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+zenith-agent = { path = "../zenith-agent" }
+zenith-fetch = { path = "../zenith-fetch" }
+zenith-mods = { path = "../zenith-mods" }
+zenith-protocol = { path = "../zenith-protocol" }
+zenith-server = { path = "../zenith-server" }
+
+[lints]
+workspace = true

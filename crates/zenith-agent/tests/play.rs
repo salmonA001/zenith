@@ -109,7 +109,18 @@ fn a_client_builds_exactly_the_world_the_server_has_from_the_seed_alone() {
     let mut compared = 0;
     for (pos, chunk) in &g.agent.session.world.chunks {
         if let Some(theirs) = g.server.world.map.get(*pos) {
-            assert!(chunk == theirs, "chunk {pos:?} differs between client and server");
+            // Block by block where the two are not the same in memory: a chunk that was changed and
+            // one that was sent whole can hold the same blocks packed differently.
+            if chunk != theirs {
+                for y in zenith_core::pos::MIN_Y..=zenith_core::pos::MAX_Y {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let (mine, yours) = (chunk.get(x, y, z), theirs.get(x, y, z));
+                            assert_eq!(mine, yours, "chunk {pos:?} differs at {x} {y} {z}");
+                        }
+                    }
+                }
+            }
             compared += 1;
         }
     }
@@ -154,7 +165,8 @@ fn walking_finds_a_way_around_walls() {
     }
     g.settle(5);
     let goal = at.add(7, 0, 0).center();
-    g.call("goto", json!({ "x": goal.x, "y": at.y as f64, "z": goal.z, "near": 1.0, "timeout": 30 })).expect("gets around");
+    g.call("goto", json!({ "x": goal.x, "y": at.y as f64, "z": goal.z, "near": 1.0, "timeout": 30 }))
+        .expect("gets around");
     assert!(g.pos().x > at.x as f64 + 4.0);
 }
 
@@ -243,7 +255,9 @@ fn asking_about_the_world_answers_from_what_the_client_knows() {
     assert_eq!(found["nearest"][0], json!([log.x, log.y, log.z]));
     let one = g.call("block", json!({ "x": log.x, "y": log.y, "z": log.z })).expect("block");
     assert_eq!(one["name"], "oak_log");
-    let counts = g.call("blocks", json!({ "x1": log.x, "y1": log.y, "z1": log.z, "x2": log.x, "y2": log.y, "z2": log.z })).expect("blocks");
+    let counts = g
+        .call("blocks", json!({ "x1": log.x, "y1": log.y, "z1": log.z, "x2": log.x, "y2": log.y, "z2": log.z }))
+        .expect("blocks");
     assert_eq!(counts["counts"]["oak_log"], 1);
     let recipes = g.call("recipes", json!({ "item": "bench" })).expect("recipes");
     assert_eq!(recipes["recipes"][0]["key"]["#"], "#planks");
@@ -260,7 +274,7 @@ fn unknown_commands_and_bad_arguments_are_explained() {
     assert!(g.call("fly_to_the_moon", json!({})).expect_err("unknown").contains("unknown"));
     assert!(g.call("block", json!({ "x": 0 })).expect_err("missing").contains("needs y"));
     assert!(g.call("walk", json!({ "direction": "up", "seconds": 1 })).expect_err("bad").contains("not a direction"));
-    assert!(g.call("screenshot", json!({ "path": "x.png" })).expect_err("no gpu").contains("windowed"));
+    assert!(g.call("screenshot", json!({ "path": "x.png" })).expect_err("no gpu").contains("the game itself"));
 }
 
 #[test]
@@ -293,7 +307,8 @@ fn dying_and_coming_back() {
 
 #[test]
 fn modified_terrain_reaches_a_client_who_joins_later() {
-    let mut server = Server::new(ServerConfig { threads: 2, seed: 9, spawn_mobs: false, ..Default::default() }).expect("server");
+    let mut server =
+        Server::new(ServerConfig { threads: 2, seed: 9, spawn_mobs: false, ..Default::default() }).expect("server");
     let pos = BlockPos::new(server.spawn.x, 200, server.spawn.z);
     server.world.request(pos.chunk(), 0);
     while !server.world.is_loaded(pos) {
@@ -322,11 +337,45 @@ fn modified_terrain_reaches_a_client_who_joins_later() {
     }
 }
 
+/// When a session asked for chunks only on its 20 ticks a second, a view 32 chunks across took 23
+/// seconds to arrive however fast the machine was. It asks between ticks too now.
+#[test]
+fn a_whole_view_arrives_without_waiting_for_ticks() {
+    let mut server = Server::new(ServerConfig { threads: 2, spawn_mobs: false, ..Default::default() }).expect("server");
+    let (near, far) = memory_pair();
+    server.add_peer(far);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(Session::connect(near, "quick", None, 10, 2, Duration::from_secs(20))).ok();
+    });
+    let mut session = loop {
+        server.tick();
+        if let Ok(s) = rx.try_recv() {
+            break s.expect("connected");
+        }
+    };
+    // One tick tells the session where it is; after that it is only polled. The server still ticks,
+    // because that is when its answers go out.
+    session.tick(zenith_world::physics::MoveInput::default());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while session.loaded_chunks() < session.wanted_chunks() {
+        assert!(
+            Instant::now() < deadline,
+            "only {} of the {} chunks in view arrived",
+            session.loaded_chunks(),
+            session.wanted_chunks()
+        );
+        server.tick();
+        session.poll();
+    }
+}
+
 #[test]
 fn many_agents_can_play_over_real_sockets_at_full_speed() {
     let stop = Arc::new(AtomicBool::new(false));
     let (addr, peers) = listen("127.0.0.1:0", stop.clone()).expect("listens");
-    let server = Server::new(ServerConfig { threads: 2, seed: 4, spawn_mobs: false, ..Default::default() }).expect("server");
+    let server =
+        Server::new(ServerConfig { threads: 2, seed: 4, spawn_mobs: false, ..Default::default() }).expect("server");
     let thread = {
         let stop = stop.clone();
         std::thread::spawn(move || server.run(stop, peers))

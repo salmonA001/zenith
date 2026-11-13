@@ -6,6 +6,7 @@ pub mod entity;
 pub mod inventory;
 pub mod persist;
 pub mod player;
+pub mod rails;
 pub mod rules;
 pub mod world;
 
@@ -15,19 +16,19 @@ use player::Player;
 use std::collections::VecDeque;
 use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use world::ServerWorld;
-use zenith_content::{ItemStack, Pack, Registry, Stable};
+use zenith_content::{ItemStack, Pack, Registry, Stable, id};
 use zenith_core::glam::DVec3;
 use zenith_core::hash::{fnv64, fnv64_more};
 use zenith_core::pos::SEA_LEVEL;
 use zenith_core::{Aabb, BlockPos, ChunkPos, FxMap, FxSet};
 use zenith_protocol::*;
 use zenith_world::physics::Body;
-use zenith_world::{Generator, GENERATOR_VERSION};
+use zenith_world::{BlockAccess, GENERATOR_VERSION, Generator};
 
 pub const TICKS_PER_SECOND: u64 = 20;
 const TICK: Duration = Duration::from_millis(1000 / TICKS_PER_SECOND);
@@ -149,6 +150,8 @@ pub struct Server {
     delta_tx: Sender<DiskDelta>,
     delta_rx: Receiver<DiskDelta>,
     stable: Stable,
+    /// What item numbers mean in saved files that keep no list of their own: see `LevelMeta`.
+    legacy_items: Vec<String>,
     next_ping: u32,
     chunks_buf: Vec<ChunkPos>,
 }
@@ -161,14 +164,14 @@ impl Server {
             Some(d) => persist::read_level(d).map_err(|e| format!("cannot read the level file: {e}"))?,
             None => None,
         };
-        if let Some(l) = &level {
-            if l.generator_version != GENERATOR_VERSION {
-                return Err(format!(
-                    "this world was made by terrain generator {}, and this build has generator {}: \
+        if let Some(l) = &level
+            && l.generator_version != GENERATOR_VERSION
+        {
+            return Err(format!(
+                "this world was made by terrain generator {}, and this build has generator {}: \
                      the land it never touched would come out different. Refusing to open it.",
-                    l.generator_version, GENERATOR_VERSION
-                ));
-            }
+                l.generator_version, GENERATOR_VERSION
+            ));
         }
         let stable = level.as_ref().map_or_else(Stable::default, |l| l.stable.clone());
         let reg = Arc::new(Registry::build(&cfg.packs, &stable)?);
@@ -181,8 +184,14 @@ impl Server {
             }
             None => (None, Vec::new()),
         };
-        let saved_names = level.as_ref().map_or_else(|| reg.items().iter().map(|i| i.name.clone()).collect(), |l| l.items.clone());
-        let remap = ItemRemap::new(&saved_names, &reg);
+        // What item numbers mean in files that do not say: the list kept for that, or in a world
+        // from before there was one, the numbering it was last saved with.
+        let legacy_items: Vec<String> = match &level {
+            Some(l) if !l.legacy_items.is_empty() => l.legacy_items.clone(),
+            Some(l) => l.items.clone(),
+            None => reg.items().iter().map(|i| i.name.clone()).collect(),
+        };
+        let remap = ItemRemap::new(&legacy_items, &reg);
         let mut world = ServerWorld::new(reg.clone(), generator.clone(), seed, cfg.threads, disk, saved, remap);
 
         let spawn = match &level {
@@ -192,10 +201,14 @@ impl Server {
                 BlockPos::new(x, y, z)
             }
         };
-        let clock = level.as_ref().map_or(Clock { tick: 0, time: 1000, rain: 0 }, |l| Clock { tick: l.tick, time: l.time, rain: l.rain });
+        let clock = level.as_ref().map_or(Clock { tick: 0, time: 1000, rain: 0 }, |l| Clock {
+            tick: l.tick,
+            time: l.time,
+            rain: l.rain,
+        });
         world.tick = clock.tick;
         let (delta_tx, delta_rx) = mpsc::channel();
-        let server = Self {
+        let mut server = Self {
             world,
             entities: Entities::default(),
             players: Vec::new(),
@@ -210,12 +223,28 @@ impl Server {
             delta_tx,
             delta_rx,
             stable: reg.stable().clone(),
+            legacy_items,
             next_ping: 1,
             chunks_buf: Vec::new(),
             cfg,
         };
         if level.is_none() {
             server.write_level().map_err(|e| format!("cannot write the level file: {e}"))?;
+        }
+        // Boats and carts are where they were left, and a cart where it was on its rails, going as
+        // fast as it went. Nothing moves until the ground under it has loaded.
+        if let Some(d) = &dir {
+            for v in persist::read_vehicles(d) {
+                let id = server.entities.spawn_vehicle(&server.world, v.kind, v.pos);
+                if let Some(e) = server.entities.list.get_mut(&id) {
+                    e.yaw = v.yaw;
+                    if let entity::Data::Vehicle(ride) = &mut e.data
+                        && v.track.is_some()
+                    {
+                        (ride.track, ride.speed) = (v.track, v.speed);
+                    }
+                }
+            }
         }
         Ok(server)
     }
@@ -233,6 +262,7 @@ impl Server {
             default_mode: self.cfg.default_mode,
             stable: self.stable.clone(),
             items: self.world.reg.items().iter().map(|i| i.name.clone()).collect(),
+            legacy_items: self.legacy_items.clone(),
         };
         persist::write_level(dir, &level)
     }
@@ -243,7 +273,8 @@ impl Server {
         self.world.request(pos, 0);
         let reg = self.world.reg.clone();
         let c = self.world.map.get(pos).cloned().unwrap_or_else(|| self.world.generator.chunk(pos));
-        let top = c.top(self.spawn.x & 15, self.spawn.z & 15, |s| reg.lut.collides[s.kind() as usize]).unwrap_or(SEA_LEVEL);
+        let top =
+            c.top(self.spawn.x & 15, self.spawn.z & 15, |s| reg.lut.collides[s.kind() as usize]).unwrap_or(SEA_LEVEL);
         DVec3::new(self.spawn.x as f64 + 0.5, top as f64 + 1.0, self.spawn.z as f64 + 0.5)
     }
 
@@ -299,10 +330,11 @@ impl Server {
         let saved = self.cfg.world_dir.as_deref().and_then(|d| persist::read_player(d, &name));
         let mut player = match saved {
             Some(mut save) => {
-                if let Some(dir) = &self.cfg.world_dir {
-                    if let Ok(Some(level)) = persist::read_level(dir) {
-                        ItemRemap::new(&level.items, &self.world.reg).inventory(&mut save.inventory);
-                    }
+                // Its items, numbered as they were when it was saved, in today's numbers.
+                if save.items.is_empty() {
+                    self.world.opened_with.inventory(&mut save.inventory);
+                } else {
+                    ItemRemap::new(&save.items, &self.world.reg).inventory(&mut save.inventory);
                 }
                 let mut p = Player::from_save(id, name.clone(), peer, save);
                 p.op |= op;
@@ -332,7 +364,8 @@ impl Server {
     }
 
     fn announce_players(&self) {
-        let list: Vec<PlayerEntry> = self.players.iter().map(|p| PlayerEntry { name: p.name.clone(), ping_ms: p.ping_ms }).collect();
+        let list: Vec<PlayerEntry> =
+            self.players.iter().map(|p| PlayerEntry { name: p.name.clone(), ping_ms: p.ping_ms }).collect();
         let frame = encode(&S2C::Players(list));
         for p in &self.players {
             p.peer.send_frame(frame.clone());
@@ -346,9 +379,10 @@ impl Server {
         }
     }
 
-    /// Moves a player, telling their client.
+    /// Moves a player, telling their client. Whatever they rode in stays behind.
     pub fn teleport(&mut self, i: usize, at: DVec3) {
         let p = &mut self.players[i];
+        p.riding = None;
         p.body.pos = at;
         p.body.vel = DVec3::ZERO;
         p.body.fall = 0.0;
@@ -371,19 +405,27 @@ impl Server {
         for i in 0..self.players.len() {
             self.players[i].tick(&mut self.world);
         }
+        self.sleep();
         rules::run(&mut self.world);
         self.tick_furnaces();
 
         let views: Vec<PlayerView> = self.players.iter().map(Player::view).collect();
+        self.steer_vehicles();
         let mut damage = std::mem::take(&mut self.damage);
         entity::tick_all(&mut self.entities, &mut self.world, &views, &mut damage);
+        self.carry_riders();
         self.apply_damage(&mut damage);
         self.damage = damage;
         self.entities.take_world_events(&mut self.world);
+        for (id, amount) in std::mem::take(&mut self.world.xp_awards) {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == id) {
+                p.add_xp(&mut self.world, amount);
+            }
+        }
         self.grid.rebuild(&self.entities);
         self.pick_up_items();
 
-        if self.cfg.spawn_mobs && self.world.tick % 20 == 0 {
+        if self.cfg.spawn_mobs && self.world.tick.is_multiple_of(20) {
             let night = (12500..23500).contains(&self.clock.time);
             entity::natural_spawns(&mut self.entities, &mut self.world, &views, night);
         }
@@ -391,10 +433,10 @@ impl Server {
         self.send_updates();
         self.drop_gone();
 
-        if self.world.tick % self.cfg.autosave_ticks == 0 {
-            if let Err(e) = self.save() {
-                eprintln!("zenith: autosave failed: {e}");
-            }
+        if self.world.tick.is_multiple_of(self.cfg.autosave_ticks)
+            && let Err(e) = self.save()
+        {
+            eprintln!("zenith: autosave failed: {e}");
         }
         self.stats.record(started.elapsed());
     }
@@ -439,6 +481,11 @@ impl Server {
             C2S::Dig { pos, .. } => self.players[i].start_dig(&mut self.world, pos),
             C2S::CancelDig => self.players[i].cancel_dig(&mut self.world),
             C2S::UseOn { pos, face } => {
+                let sneaking = self.players[i].last_input.keys.has(zenith_world::physics::Keys::SNEAK);
+                if matches!(self.world.block(pos).kind(), id::BED | id::BED_HEAD) && !sneaking {
+                    self.try_sleep(i, pos);
+                    return;
+                }
                 let others: Vec<Aabb> = self
                     .players
                     .iter()
@@ -448,7 +495,14 @@ impl Server {
                     .collect();
                 self.players[i].use_on(&mut self.world, &others, &self.entities, pos, face);
             }
-            C2S::UseItem => self.players[i].use_item(&mut self.world),
+            C2S::UseItem => {
+                let reg = self.world.reg.clone();
+                if self.players[i].holds_rod(&reg) {
+                    self.fish(i);
+                } else {
+                    self.players[i].use_item(&mut self.world);
+                }
+            }
             C2S::Attack { entity } => {
                 let views: Vec<PlayerView> = self.players.iter().map(Player::view).collect();
                 if let Some(d) = self.players[i].attack(&mut self.world, &mut self.entities, &views, entity) {
@@ -469,10 +523,10 @@ impl Server {
             C2S::Pick { item } => {
                 let reg = self.world.reg.clone();
                 let p = &mut self.players[i];
-                if p.mode == GameMode::Creative {
-                    if let Some(def) = reg.item(item) {
-                        p.inv.cursor = Some(ItemStack::new(item, def.max_stack.max(1)));
-                    }
+                if p.mode == GameMode::Creative
+                    && let Some(def) = reg.item(item)
+                {
+                    p.inv.cursor = Some(ItemStack::new(item, def.max_stack.max(1)));
                 }
             }
             C2S::SetFlying(on) => {
@@ -483,17 +537,230 @@ impl Server {
             }
             C2S::Chat(text) => self.chat(i, text),
             C2S::Respawn => {
-                let at = self.spawn_point();
+                // Back to the bed, if it is still there; a bed in a chunk not loaded gets the benefit of
+                // the doubt.
+                let bed = self.players[i].bed;
+                let kept = bed.filter(|&b| !self.world.is_loaded(b) || self.world.block(b).kind() == id::BED);
+                let at = match kept {
+                    Some(b) => DVec3::new(b.x as f64 + 0.5, b.y as f64 + 9.0 / 16.0, b.z as f64 + 0.5),
+                    None => {
+                        if bed.is_some() && self.players[i].dead {
+                            self.players[i].bed = None;
+                            self.tell(i, "Your bed is gone, so you are back where the world began.");
+                        }
+                        self.spawn_point()
+                    }
+                };
                 self.players[i].respawn(at);
+            }
+            C2S::WakeUp => self.players[i].sleeping = None,
+            C2S::SignText { pos, lines } => {
+                self.players[i].write_sign(&mut self.world, pos, lines);
+            }
+            C2S::UseEntity { entity } => {
+                let vehicle =
+                    self.entities.list.get(&entity).filter(|e| e.kind.is_vehicle()).map(|e| e.aabb().center());
+                match vehicle {
+                    Some(at) => self.board(i, entity, at),
+                    None => self.players[i].use_entity(&mut self.world, &mut self.entities, entity),
+                }
+            }
+            C2S::Shoot { drawn } => {
+                if let Some((pos, vel, damage)) = self.players[i].shoot(&mut self.world, drawn) {
+                    let owner = self.players[i].id;
+                    let id = self.entities.spawn(EntityKind::Arrow, pos, Data::Arrow { owner, stuck: false, damage });
+                    if let Some(e) = self.entities.list.get_mut(&id) {
+                        e.body.vel = vel;
+                    }
+                    self.world.effect(EffectKind::Shoot, pos);
+                }
+            }
+            C2S::Guard(on) => {
+                let reg = self.world.reg.clone();
+                self.players[i].guard(on, &reg);
             }
             C2S::Pong(n) => {
                 let p = &mut self.players[i];
-                if let Some((sent, at)) = p.ping_sent {
-                    if sent == n {
-                        p.ping_ms = at.elapsed().as_millis().min(u16::MAX as u128) as u16;
-                        p.ping_sent = None;
-                    }
+                if let Some((sent, at)) = p.ping_sent
+                    && sent == n
+                {
+                    p.ping_ms = at.elapsed().as_millis().min(u16::MAX as u128) as u16;
+                    p.ping_sent = None;
                 }
+            }
+        }
+    }
+
+    /// Casts the fishing rod in hand; or, with its float already out, pulls the line in, and with
+    /// it a fish, if one is biting just then.
+    fn fish(&mut self, i: usize) {
+        let reg = self.world.reg.clone();
+        let p = &mut self.players[i];
+        if p.dead || p.sleeping.is_some() || p.fish_cool > 0 {
+            return;
+        }
+        p.fish_cool = 6;
+        let (owner, eye, look) = (p.id, p.eye(), p.last_input.look());
+        let out = self.entities.list.values().find_map(|e| match e.data {
+            Data::Float { owner: whose, bite, .. } if whose == owner => Some((e.id, e.body.pos, bite > 0)),
+            _ => None,
+        });
+        let Some((float, at, biting)) = out else {
+            let wait = entity::bite_wait(&mut self.world.rng);
+            let id = self.entities.spawn(EntityKind::Float, eye + look * 0.6, Data::Float { owner, wait, bite: 0 });
+            if let Some(e) = self.entities.list.get_mut(&id) {
+                e.body.vel = look * 0.5 + DVec3::Y * 0.15;
+            }
+            self.world.effect(EffectKind::Shoot, eye);
+            return;
+        };
+        self.entities.list.remove(&float);
+        if !biting {
+            return;
+        }
+        // Mostly fish; now and then something else that was down there.
+        let roll = self.world.rng.below(100);
+        let name = match roll {
+            0..55 => zenith_content::it::PERCH,
+            55..88 => zenith_content::it::TROUT,
+            88..96 => zenith_content::it::STICK,
+            _ => zenith_content::it::CRYSTAL,
+        };
+        if let Some(item) = reg.item_by_name(name) {
+            // It comes out of the water in an arc that ends at the angler.
+            let id = self.entities.spawn(
+                EntityKind::Item,
+                at + DVec3::Y * 0.3,
+                Data::Item { stack: ItemStack::new(item, 1), delay: 6 },
+            );
+            let to = eye - at;
+            if let Some(e) = self.entities.list.get_mut(&id) {
+                e.body.vel = DVec3::new(to.x * 0.1, to.y * 0.1 + to.length().sqrt() * 0.11, to.z * 0.1);
+            }
+        }
+        self.world.effect(EffectKind::Splash, at);
+        let p = &mut self.players[i];
+        if p.mode == GameMode::Survival {
+            p.inv.damage_held(&reg);
+        }
+        let xp = 1 + self.world.rng.below(3);
+        self.players[i].add_xp(&mut self.world, xp);
+    }
+
+    /// Gets into a boat or cart, if it is near, empty, and this player is not in one already.
+    fn board(&mut self, i: usize, vehicle: u32, at: DVec3) {
+        let taken = self.players.iter().any(|q| q.riding == Some(vehicle));
+        let p = &mut self.players[i];
+        if taken || p.dead || p.riding.is_some() || p.sleeping.is_some() || p.eye().distance(at) > 4.5 {
+            return;
+        }
+        p.riding = Some(vehicle);
+        p.dig = None;
+        p.inputs.clear();
+        self.tell(i, "Sneak to get off.");
+    }
+
+    /// What the riders want of their boats and carts this tick: ahead or back, which way to turn,
+    /// and where they look.
+    fn steer_vehicles(&mut self) {
+        for e in self.entities.list.values_mut() {
+            if let entity::Data::Vehicle(ride) = &mut e.data {
+                ride.rider = None;
+                (ride.ahead, ride.turn) = (0.0, 0.0);
+            }
+        }
+        for p in &self.players {
+            let Some(id) = p.riding else { continue };
+            if let Some(entity::Data::Vehicle(ride)) = self.entities.list.get_mut(&id).map(|e| &mut e.data) {
+                let keys = p.last_input.keys;
+                let axis = |a: u8, b: u8| f64::from(i8::from(keys.has(a)) - i8::from(keys.has(b)));
+                use zenith_world::physics::Keys;
+                ride.rider = Some(p.id);
+                ride.ahead = axis(Keys::FORWARD, Keys::BACK);
+                ride.turn = axis(Keys::LEFT, Keys::RIGHT);
+                ride.look = p.last_input.look();
+            }
+        }
+    }
+
+    /// Riders sit in their boats and carts and go where they go. One whose ride has gone is left
+    /// where it was. Sitting, a body is lower than standing in the seat would put it, which puts
+    /// the eye, and with it the camera and the crosshair, where a seated rider's would be.
+    fn carry_riders(&mut self) {
+        for p in &mut self.players {
+            let Some(id) = p.riding else { continue };
+            match self.entities.list.get(&id) {
+                Some(v) if !p.dead => {
+                    let seat = if v.kind == EntityKind::Boat { -0.25 } else { -0.15 };
+                    p.body.pos = v.body.pos + DVec3::Y * seat;
+                    p.body.vel = DVec3::ZERO;
+                    p.body.fall = 0.0;
+                }
+                _ => p.riding = None,
+            }
+        }
+    }
+
+    /// Tells one player something, as the game.
+    fn tell(&self, i: usize, text: &str) {
+        self.players[i].peer.send(&S2C::Chat(ChatLine { from: None, text: text.to_string() }));
+    }
+
+    /// Lies down in the bed at `pos`, if it is night and nothing hostile is near. Either way, the bed
+    /// is where this player comes back to from now on.
+    fn try_sleep(&mut self, i: usize, pos: BlockPos) {
+        let foot = player::bed_foot(pos, self.world.block(pos));
+        let p = &self.players[i];
+        if p.dead || p.sleeping.is_some() || p.eye().distance(pos.center()) > 4.5 {
+            return;
+        }
+        if p.bed != Some(foot) {
+            self.players[i].bed = Some(foot);
+            self.tell(i, "This bed is where you will come back to.");
+        }
+        if !(12_500..23_500).contains(&self.clock.time) {
+            self.tell(i, "You can only sleep at night.");
+            return;
+        }
+        let near =
+            self.entities.list.values().any(|e| entity::is_hostile(e.kind) && e.body.pos.distance(foot.center()) < 8.0);
+        if near {
+            self.tell(i, "You cannot rest now: something is close by.");
+            return;
+        }
+        let p = &mut self.players[i];
+        p.riding = None;
+        p.sleeping = Some(foot);
+        p.sleep_ticks = 0;
+        p.dig = None;
+        p.eating = None;
+        p.body.pos = DVec3::new(foot.x as f64 + 0.5, foot.y as f64 + 9.0 / 16.0, foot.z as f64 + 0.5);
+        p.body.vel = DVec3::ZERO;
+        p.inputs.clear();
+    }
+
+    /// When everyone alive is asleep, and has been for five seconds, the night passes. A sleeper
+    /// whose bed has gone wakes up.
+    fn sleep(&mut self) {
+        for p in &mut self.players {
+            if let Some(foot) = p.sleeping
+                && self.world.block(foot).kind() != id::BED
+            {
+                p.sleeping = None;
+            }
+        }
+        let sleepers = self.players.iter().filter(|p| p.sleeping.is_some()).count();
+        let awake = self.players.iter().any(|p| !p.dead && p.sleeping.is_none());
+        let rested = self.players.iter().filter(|p| p.sleeping.is_some()).all(|p| p.sleep_ticks >= 100);
+        if sleepers == 0 || awake || !rested {
+            return;
+        }
+        self.clock.time = 0;
+        self.clock.rain = 0;
+        self.rain_target = 0;
+        for i in 0..self.players.len() {
+            if self.players[i].sleeping.take().is_some() {
+                self.tell(i, "The night has passed.");
             }
         }
     }
@@ -517,8 +784,23 @@ impl Server {
         }
     }
 
+    /// What the signs at these places say, for those that are still signs.
+    fn sign_words(&self, places: impl Iterator<Item = BlockPos>) -> Vec<(BlockPos, Vec<String>)> {
+        places
+            .filter_map(|p| match self.world.block_entities.get(&p) {
+                Some(persist::BlockEntity::Sign(lines)) => Some((p, lines.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn subscribe(&mut self, i: usize, list: Vec<ChunkPos>) {
         let player_id = self.players[i].id;
+        let wanted: FxSet<ChunkPos> = list.iter().copied().take(MAX_SUBSCRIBE).collect();
+        let signs = self.sign_words(self.world.block_entities.keys().copied().filter(|p| wanted.contains(&p.chunk())));
+        if !signs.is_empty() {
+            self.players[i].peer.send(&S2C::Signs(signs));
+        }
         for pos in list.into_iter().take(MAX_SUBSCRIBE) {
             self.players[i].subscribed.insert(pos);
             if let Some(sections) = self.world.modified_sections(pos) {
@@ -527,7 +809,11 @@ impl Server {
                 if let Some(disk) = &self.world.disk {
                     let tx = self.delta_tx.clone();
                     disk.read(pos, move |bytes| {
-                        let sections = bytes.as_deref().and_then(persist::ChunkRecord::from_bytes).map(|r| r.sections).unwrap_or_default();
+                        let sections = bytes
+                            .as_deref()
+                            .and_then(persist::ChunkRecord::from_bytes)
+                            .map(|r| r.sections)
+                            .unwrap_or_default();
                         let _ = tx.send(DiskDelta { player: player_id, pos, sections });
                     });
                 } else {
@@ -545,10 +831,10 @@ impl Server {
         // come into memory, that copy is the current one.
         while let Ok(d) = self.delta_rx.try_recv() {
             let current = self.world.modified_sections(d.pos).unwrap_or(d.sections);
-            if let Some(p) = self.players.iter_mut().find(|p| p.id == d.player) {
-                if p.subscribed.contains(&d.pos) {
-                    p.out_deltas.push(ChunkDelta::pack(d.pos, &current));
-                }
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == d.player)
+                && p.subscribed.contains(&d.pos)
+            {
+                p.out_deltas.push(ChunkDelta::pack(d.pos, &current));
             }
         }
 
@@ -565,11 +851,17 @@ impl Server {
                 }
             }
         }
-        if self.world.tick % 40 == 0 {
+        if self.world.tick.is_multiple_of(40) {
             let keep = radius + 2;
             let centers: Vec<ChunkPos> = self.players.iter().map(Player::chunk).collect();
-            let far: Vec<ChunkPos> =
-                self.world.map.chunks.keys().copied().filter(|pos| centers.iter().all(|c| c.distance(*pos) > keep)).collect();
+            let far: Vec<ChunkPos> = self
+                .world
+                .map
+                .chunks
+                .keys()
+                .copied()
+                .filter(|pos| centers.iter().all(|c| c.distance(*pos) > keep))
+                .collect();
             for pos in far {
                 if self.world.can_unload(pos) {
                     self.world.unload(pos);
@@ -577,7 +869,12 @@ impl Server {
             }
             let (world, ents) = (&self.world, &mut self.entities);
             // What was in a chunk goes with it: nothing simulates where nobody is.
-            ents.list.retain(|_, e| world.map.chunks.contains_key(&BlockPos::from_vec(e.body.pos).chunk()) || e.age < 40);
+            // Boats and carts stay, though: they are kept with the world, and wait where they were left.
+            ents.list.retain(|_, e| {
+                world.map.chunks.contains_key(&BlockPos::from_vec(e.body.pos).chunk())
+                    || e.age < 40
+                    || e.kind.is_vehicle()
+            });
         }
     }
 
@@ -591,25 +888,46 @@ impl Server {
                 self.next_weather = self.world.tick + self.world.rng.range(20 * 300, 20 * 1200) as u64;
             }
         }
-        if self.clock.rain < self.rain_target && self.world.tick % 2 == 0 {
+        if self.clock.rain < self.rain_target && self.world.tick.is_multiple_of(2) {
             self.clock.rain += 1;
-        } else if self.clock.rain > self.rain_target && self.world.tick % 2 == 0 {
+        } else if self.clock.rain > self.rain_target && self.world.tick.is_multiple_of(2) {
             self.clock.rain -= 1;
         }
     }
 
+    /// Furnaces burn and cook; campfires cook what lies on them, and hand it back when it is done.
     fn tick_furnaces(&mut self) {
         let reg = self.world.reg.clone();
         let mut changed = Vec::new();
+        let mut cooked = Vec::new();
         for (pos, be) in &mut self.world.block_entities {
-            if let persist::BlockEntity::Furnace(f) = be {
-                if f.tick(&reg) {
-                    changed.push(pos.chunk());
+            match be {
+                persist::BlockEntity::Furnace(f) => {
+                    if f.tick(&reg) {
+                        changed.push(pos.chunk());
+                    }
                 }
+                persist::BlockEntity::Campfire(cooking) => {
+                    for c in cooking.iter_mut() {
+                        c.1 = c.1.saturating_sub(1);
+                    }
+                    for &(item, _) in cooking.iter().filter(|c| c.1 == 0) {
+                        if let Some(out) = reg.smelt_result(item) {
+                            cooked.push((pos.center() + DVec3::Y * 0.4, ItemStack::new(out, 1)));
+                        }
+                        changed.push(pos.chunk());
+                    }
+                    cooking.retain(|c| c.1 > 0);
+                }
+                _ => {}
             }
         }
         for c in changed {
             self.world.mark_dirty(c);
+        }
+        for (pos, stack) in cooked {
+            self.world.effect(EffectKind::Pickup, pos);
+            self.world.events.push(world::WorldEvent::DropItem { pos, stack });
         }
     }
 
@@ -617,7 +935,9 @@ impl Server {
         self.chunks_buf.clear();
         let radius = self.cfg.sim_distance;
         let centers: Vec<ChunkPos> = self.players.iter().filter(|p| !p.dead).map(Player::chunk).collect();
-        self.chunks_buf.extend(self.world.map.chunks.keys().copied().filter(|pos| centers.iter().any(|c| c.distance(*pos) <= radius)));
+        self.chunks_buf.extend(
+            self.world.map.chunks.keys().copied().filter(|pos| centers.iter().any(|c| c.distance(*pos) <= radius)),
+        );
         // The map's iteration order depends on its history. The simulation must not.
         self.chunks_buf.sort_unstable();
         let chunks = std::mem::take(&mut self.chunks_buf);
@@ -688,7 +1008,7 @@ impl Server {
                     moves.insert(e.id, m);
                 }
                 Ok(None) => {}
-                Err(()) => jumped.push(e.id),
+                Err(_) => jumped.push(e.id),
             }
             e.sent = now;
         }
@@ -699,17 +1019,21 @@ impl Server {
                     moves.insert(p.id, m);
                 }
                 Ok(None) => {}
-                Err(()) => jumped.push(p.id),
+                Err(_) => jumped.push(p.id),
             }
             p.sent = now;
         }
 
         let changes = std::mem::take(&mut self.world.changes);
         let effects = std::mem::take(&mut self.world.effects);
-        let clock_frame = (self.world.tick % 20 == 0).then(|| encode(&S2C::Clock(self.clock)));
+        let mut changed = std::mem::take(&mut self.world.signs_changed);
+        changed.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+        changed.dedup();
+        let signs = self.sign_words(changed.into_iter());
+        let clock_frame = self.world.tick.is_multiple_of(20).then(|| encode(&S2C::Clock(self.clock)));
         let cracks: Vec<(u32, BlockPos, u8)> =
             self.players.iter().filter_map(|p| p.dig_stage().map(|(pos, stage)| (p.id, pos, stage))).collect();
-        let ping = (self.world.tick % 40 == 0).then(|| {
+        let ping = self.world.tick.is_multiple_of(40).then(|| {
             self.next_ping += 1;
             self.next_ping
         });
@@ -730,6 +1054,11 @@ impl Server {
             }
             if !p.out_blocks.is_empty() {
                 p.peer.send(&S2C::Blocks(std::mem::take(&mut p.out_blocks)));
+            }
+            let seen: Vec<(BlockPos, Vec<String>)> =
+                signs.iter().filter(|(pos, _)| p.subscribed.contains(&pos.chunk())).cloned().collect();
+            if !seen.is_empty() {
+                p.peer.send(&S2C::Signs(seen));
             }
             if !p.out_deltas.is_empty() {
                 p.peer.send(&S2C::Deltas(std::mem::take(&mut p.out_deltas)));
@@ -820,10 +1149,10 @@ impl Server {
             if self.players[i].peer.is_closed() {
                 let mut p = self.players.remove(i);
                 p.close_screen(&mut self.world);
-                if let Some(dir) = &self.cfg.world_dir {
-                    if let Err(e) = persist::write_player(dir, &p.name, &p.save()) {
-                        eprintln!("zenith: could not save {}: {e}", p.name);
-                    }
+                if let Some(dir) = &self.cfg.world_dir
+                    && let Err(e) = persist::write_player(dir, &p.name, &p.save(&self.world.reg))
+                {
+                    eprintln!("zenith: could not save {}: {e}", p.name);
                 }
                 self.broadcast_chat(None, format!("{} left.", p.name));
                 left = true;
@@ -842,8 +1171,22 @@ impl Server {
         self.write_level()?;
         if let Some(dir) = &self.cfg.world_dir {
             for p in &self.players {
-                persist::write_player(dir, &p.name, &p.save())?;
+                persist::write_player(dir, &p.name, &p.save(&self.world.reg))?;
             }
+            let vehicles: Vec<persist::SavedVehicle> = self
+                .entities
+                .list
+                .values()
+                .filter(|e| e.kind.is_vehicle())
+                .map(|e| {
+                    let (track, speed) = match &e.data {
+                        entity::Data::Vehicle(ride) => (ride.track, ride.speed),
+                        _ => (None, 0.0),
+                    };
+                    persist::SavedVehicle { kind: e.kind, pos: e.body.pos, yaw: e.yaw, track, speed }
+                })
+                .collect();
+            persist::write_vehicles(dir, &vehicles)?;
         }
         Ok(n)
     }
@@ -921,7 +1264,10 @@ impl Server {
 }
 
 /// Accepts connections on a socket and hands them over as peers, until `stop` is set.
-pub fn listen(addr: impl ToSocketAddrs, stop: Arc<AtomicBool>) -> std::io::Result<(std::net::SocketAddr, Receiver<Peer>)> {
+pub fn listen(
+    addr: impl ToSocketAddrs,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<(std::net::SocketAddr, Receiver<Peer>)> {
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -954,7 +1300,11 @@ pub fn listen(addr: impl ToSocketAddrs, stop: Arc<AtomicBool>) -> std::io::Resul
 /// Reads every `*.json` content pack in a folder, in name order.
 pub fn load_packs(dir: &Path) -> Result<Vec<Pack>, String> {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect(),
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect(),
         Err(_) => return Ok(Vec::new()),
     };
     files.sort();

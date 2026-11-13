@@ -72,11 +72,7 @@ impl BlockPos {
     }
     /// This position's section index inside its chunk, if it is in the world.
     pub const fn section(self) -> Option<usize> {
-        if self.in_world() {
-            Some(((self.y - MIN_Y) >> 4) as usize)
-        } else {
-            None
-        }
+        if self.in_world() { Some(((self.y - MIN_Y) >> 4) as usize) } else { None }
     }
 }
 

@@ -15,9 +15,22 @@ use zenith_world::{BlockAccess, Chunk, ChunkMap, Generator};
 /// Something the world wants done that only the entity system can do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorldEvent {
-    DropItem { pos: DVec3, stack: ItemStack },
-    Falling { pos: BlockPos, state: BlockState },
-    Prime { pos: BlockPos },
+    DropItem {
+        pos: DVec3,
+        stack: ItemStack,
+    },
+    Falling {
+        pos: BlockPos,
+        state: BlockState,
+    },
+    Prime {
+        pos: BlockPos,
+    },
+    /// A boat or a cart put down.
+    Vehicle {
+        kind: zenith_protocol::EntityKind,
+        pos: DVec3,
+    },
 }
 
 struct Loaded {
@@ -30,6 +43,10 @@ pub struct ServerWorld {
     pub generator: Arc<Generator>,
     pub map: ChunkMap,
     pub block_entities: FxMap<BlockPos, BlockEntity>,
+    /// Signs whose words those watching have yet to hear: new, loaded or rewritten.
+    pub signs_changed: Vec<BlockPos>,
+    /// Experience earned this tick, by player id: for the server to hand out.
+    pub xp_awards: Vec<(u32, u32)>,
     pub tick: u64,
     pub rng: Rng,
     /// What changed since the last time the server told its players.
@@ -50,7 +67,16 @@ pub struct ServerWorld {
     loaded_rx: Receiver<Loaded>,
     pool: Option<Arc<Pool>>,
     pub disk: Option<Disk>,
-    remap: Arc<ItemRemap>,
+    /// How to read item numbers saved before the world was opened, in records and player files
+    /// that do not say what their numbers meant.
+    pub opened_with: Arc<ItemRemap>,
+    /// Every item's name, by number: what records saved now say their numbers mean.
+    item_names: Arc<[String]>,
+}
+
+/// Every item's name, by number.
+fn reg_names(reg: &Registry) -> Arc<[String]> {
+    reg.items().iter().map(|i| i.name.clone()).collect()
 }
 
 impl BlockAccess for ServerWorld {
@@ -64,17 +90,21 @@ impl BlockAccess for ServerWorld {
     }
 }
 
-fn build_chunk(generator: &Generator, pos: ChunkPos, bytes: Option<Vec<u8>>, remap: &ItemRemap) -> Loaded {
+fn build_chunk(
+    generator: &Generator,
+    pos: ChunkPos,
+    bytes: Option<Vec<u8>>,
+    reg: &Registry,
+    remap: &ItemRemap,
+) -> Loaded {
     let mut chunk = generator.chunk(pos);
     let mut block_entities = Vec::new();
-    if let Some(record) = bytes.as_deref().and_then(ChunkRecord::from_bytes) {
+    if let Some(mut record) = bytes.as_deref().and_then(ChunkRecord::from_bytes) {
         if let Err(e) = chunk.apply_encoded(&record.sections) {
             eprintln!("zenith: chunk {pos:?} has a damaged section ({e}); using the generated one");
         }
+        record.renumber(reg, remap);
         block_entities = record.block_entities;
-        for (_, be) in &mut block_entities {
-            remap.block_entity(be);
-        }
     }
     Loaded { chunk, block_entities }
 }
@@ -82,13 +112,24 @@ fn build_chunk(generator: &Generator, pos: ChunkPos, bytes: Option<Vec<u8>>, rem
 impl ServerWorld {
     /// `threads` of 0 means no background work at all: every chunk loads during the call that asks
     /// for it, which is what makes a run exactly reproducible.
-    pub fn new(reg: Arc<Registry>, generator: Arc<Generator>, seed: u64, threads: usize, disk: Option<Disk>, saved: Vec<ChunkPos>, remap: ItemRemap) -> Self {
+    pub fn new(
+        reg: Arc<Registry>,
+        generator: Arc<Generator>,
+        seed: u64,
+        threads: usize,
+        disk: Option<Disk>,
+        saved: Vec<ChunkPos>,
+        remap: ItemRemap,
+    ) -> Self {
         let (loaded_tx, loaded_rx) = mpsc::channel();
+        let item_names = reg_names(&reg);
         Self {
             reg,
             generator,
             map: ChunkMap::default(),
             block_entities: FxMap::default(),
+            signs_changed: Vec::new(),
+            xp_awards: Vec::new(),
             tick: 0,
             rng: Rng::new(seed ^ 0x5352_5652),
             changes: Vec::new(),
@@ -105,7 +146,8 @@ impl ServerWorld {
             loaded_rx,
             pool: (threads > 0).then(|| Arc::new(Pool::new("chunk", threads))),
             disk,
-            remap: Arc::new(remap),
+            opened_with: Arc::new(remap),
+            item_names,
         }
     }
 
@@ -115,10 +157,10 @@ impl ServerWorld {
             return;
         }
         let needs_disk = self.saved.contains(&pos);
-        let (generator, remap) = (self.generator.clone(), self.remap.clone());
+        let (generator, reg, remap) = (self.generator.clone(), self.reg.clone(), self.opened_with.clone());
         let Some(pool) = self.pool.clone() else {
             let bytes = if needs_disk { self.read_now(pos) } else { None };
-            let loaded = build_chunk(&generator, pos, bytes, &remap);
+            let loaded = build_chunk(&generator, pos, bytes, &reg, &remap);
             self.accept(loaded);
             return;
         };
@@ -129,11 +171,11 @@ impl ServerWorld {
                 let worker_pool = pool.clone();
                 worker_pool.submit(priority, move || {
                     let _keep_alive = pool;
-                    let _ = tx.send(build_chunk(&generator, pos, bytes, &remap));
+                    let _ = tx.send(build_chunk(&generator, pos, bytes, &reg, &remap));
                 });
             }),
             _ => pool.submit(priority, move || {
-                let _ = tx.send(build_chunk(&generator, pos, None, &remap));
+                let _ = tx.send(build_chunk(&generator, pos, None, &reg, &remap));
             }),
         }
     }
@@ -150,6 +192,9 @@ impl ServerWorld {
     fn accept(&mut self, loaded: Loaded) {
         self.pending.remove(&loaded.chunk.pos);
         for (pos, be) in loaded.block_entities {
+            if matches!(be, BlockEntity::Sign(_)) {
+                self.signs_changed.push(pos);
+            }
             self.block_entities.insert(pos, be);
         }
         self.map.chunks.insert(loaded.chunk.pos, loaded.chunk);
@@ -168,8 +213,7 @@ impl ServerWorld {
 
     /// Whether forgetting `pos` loses nothing: the disk has it, or the generator can make it again.
     pub fn can_unload(&self, pos: ChunkPos) -> bool {
-        self.disk.is_some()
-            || (!self.dirty.contains(&pos) && self.map.chunks.get(&pos).is_none_or(|c| c.modified == 0))
+        self.disk.is_some() || (!self.dirty.contains(&pos) && self.map.chunks.get(&pos).is_none_or(|c| c.modified == 0))
     }
 
     /// Saves what changed in `pos` and forgets it.
@@ -185,8 +229,12 @@ impl ServerWorld {
         }
         let Some(disk) = &self.disk else { return };
         let Some(chunk) = self.map.chunks.get(&pos) else { return };
-        let bes: Vec<_> = self.block_entities.iter().filter(|(p, _)| p.chunk() == pos).map(|(p, b)| (*p, b.clone())).collect();
-        disk.save(chunk.clone(), bes);
+        let bes: Vec<_> =
+            self.block_entities.iter().filter(|(p, _)| p.chunk() == pos).map(|(p, b)| (*p, b.clone())).collect();
+        // Only what holds items needs to say what their numbers mean.
+        let holds_items = bes.iter().any(|(_, b)| !matches!(b, BlockEntity::Sign(_)));
+        let items = if holds_items { self.item_names.clone() } else { Arc::from(Vec::new()) };
+        disk.save(chunk.clone(), bes, items);
         self.saved.insert(pos);
     }
 
@@ -239,6 +287,10 @@ impl ServerWorld {
         let items: Vec<Slot> = match be {
             BlockEntity::Chest(cells) => cells,
             BlockEntity::Furnace(f) => vec![f.input, f.fuel, f.output],
+            BlockEntity::Sign(_) => Vec::new(),
+            BlockEntity::Campfire(cooking) => {
+                cooking.into_iter().map(|(item, _)| Some(ItemStack::new(item, 1))).collect()
+            }
         };
         for stack in items.into_iter().flatten() {
             self.events.push(WorldEvent::DropItem { pos: p.center(), stack });
@@ -303,7 +355,10 @@ impl ServerWorld {
 /// What a chest found in the world holds, decided by the seed and its position. A chest placed by a
 /// player has its block entity made first, so it starts empty.
 fn chest_contents(seed: u64, p: BlockPos, reg: &Registry) -> Vec<Slot> {
-    let mut rng = Rng::new(zenith_core::rng::mix(seed ^ 0x4C4F_4F54, ((p.x as u64) << 32) ^ ((p.y as u64) << 16) ^ p.z as u32 as u64));
+    let mut rng = Rng::new(zenith_core::rng::mix(
+        seed ^ 0x4C4F_4F54,
+        ((p.x as u64) << 32) ^ ((p.y as u64) << 16) ^ p.z as u32 as u64,
+    ));
     let mut cells = vec![None; CHEST_SIZE];
     const LOOT: [(&str, u32, i32); 12] = [
         ("stick", 8, 8),

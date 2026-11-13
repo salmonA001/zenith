@@ -1,0 +1,5 @@
+CPU: Intel(R) Core(TM) i5-14400F, 10 cores, 16 threads
+RAM: 32 GB
+GPU: NVIDIA GeForce RTX 5060, driver 32.0.16.2101
+OS: Microsoft Windows 11 Home
+rustc 1.99.1 (58cf8f9c3 2026-10-13)

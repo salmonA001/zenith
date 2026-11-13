@@ -84,10 +84,8 @@ impl Generator {
                 let (x, z) = ((c * r as f64) as i32, (s * r as f64) as i32);
                 let col = self.column(x as f64, z as f64);
                 let biome = Self::biome(&col);
-                let good = matches!(
-                    biome,
-                    Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Savanna | Biome::Taiga
-                );
+                let good =
+                    matches!(biome, Biome::Plains | Biome::Forest | Biome::BirchForest | Biome::Savanna | Biome::Taiga);
                 if good && col.height > SEA_LEVEL as f64 + 2.0 && col.height < 110.0 && col.rugged < 0.1 {
                     return (x, col.height.floor() as i32 + 2, z);
                 }
@@ -113,11 +111,8 @@ impl Generator {
         for lz in 0..16 {
             for lx in 0..16 {
                 let col = grid.at(ox + lx, oz + lz);
-                columns[(lz * 16 + lx) as usize] = Col {
-                    col,
-                    biome: Self::biome(&col),
-                    open: self.cave_ceiling(ox + lx, oz + lz, &col),
-                };
+                columns[(lz * 16 + lx) as usize] =
+                    Col { col, biome: Self::biome(&col), open: self.cave_ceiling(ox + lx, oz + lz, &col) };
             }
         }
 
@@ -440,7 +435,8 @@ impl Generator {
                         let here = Self::biome(&col);
                         let Some((_, kind)) = features::tree_for(here, &mut rng) else { continue };
                         let tree_seed = rng.next_u64();
-                        let high_enough = col.height >= SEA_LEVEL as f64 + 1.0 || (here == Biome::Swamp && col.height >= SEA_LEVEL as f64 - 1.0);
+                        let high_enough = col.height >= SEA_LEVEL as f64 + 1.0
+                            || (here == Biome::Swamp && col.height >= SEA_LEVEL as f64 - 1.0);
                         let open = self.cave_ceiling(x, z, &col) < col.height.floor() as i32;
                         let tree_line = Self::surface_temperature(&col) > -0.95;
                         if high_enough && col.rugged < 0.42 && open && tree_line {
@@ -471,7 +467,8 @@ impl Generator {
         for gz in (pos.z - 1).div_euclid(RUIN_GRID)..=(pos.z + 1).div_euclid(RUIN_GRID) {
             for gx in (pos.x - 1).div_euclid(RUIN_GRID)..=(pos.x + 1).div_euclid(RUIN_GRID) {
                 let mut rng = Rng::new(chunk_seed(self.seed, gx, gz, SALT_RUIN));
-                let (cx, cz) = (gx * RUIN_GRID + rng.range(0, RUIN_GRID - 1), gz * RUIN_GRID + rng.range(0, RUIN_GRID - 1));
+                let (cx, cz) =
+                    (gx * RUIN_GRID + rng.range(0, RUIN_GRID - 1), gz * RUIN_GRID + rng.range(0, RUIN_GRID - 1));
                 if (cx - pos.x).abs() > 1 || (cz - pos.z).abs() > 1 {
                     continue;
                 }
@@ -586,7 +583,13 @@ fn surface_blocks(biome: Biome, ground: i32, col: &Column, slope: f64, patch: f6
     let underwater = ground < SEA_LEVEL;
     if underwater {
         let t = if ground < SEA_LEVEL - 10 {
-            if patch > 0.25 { id::GRAVEL } else if patch < -0.3 { id::CLAY } else { id::SAND }
+            if patch > 0.25 {
+                id::GRAVEL
+            } else if patch < -0.3 {
+                id::CLAY
+            } else {
+                id::SAND
+            }
         } else if patch > 0.3 {
             id::GRAVEL
         } else {
@@ -703,10 +706,10 @@ impl ChunkStamp<'_> {
 impl Stamp for ChunkStamp<'_> {
     #[inline]
     fn put(&mut self, x: i32, y: i32, z: i32, state: BlockState, force: bool) {
-        if let Some(i) = self.index(x, y, z) {
-            if force || self.cells[i] == 0 {
-                self.cells[i] = state.0;
-            }
+        if let Some(i) = self.index(x, y, z)
+            && (force || self.cells[i] == 0)
+        {
+            self.cells[i] = state.0;
         }
     }
     #[inline]

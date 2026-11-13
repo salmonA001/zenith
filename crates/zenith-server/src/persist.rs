@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use zenith_content::{Registry, Stable};
@@ -25,8 +26,13 @@ pub struct LevelMeta {
     pub default_mode: GameMode,
     /// The numbers given to pack content.
     pub stable: Stable,
-    /// Item names by number, so stacks in saves survive the numbering changing.
+    /// Item names by number, as they are numbered now.
     pub items: Vec<String>,
+    /// Item names by number as they stood for chunk and player files that keep no list of their
+    /// own, from before each did: those go by this, however the numbering has moved on since. Set
+    /// once, the first time a world from before is opened, and kept as it is from then on.
+    #[serde(default)]
+    pub legacy_items: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +44,52 @@ pub struct PlayerSave {
     pub flying: bool,
     pub op: bool,
     pub inventory: Inventory,
+    /// The food bar. Saves from before there was one start full.
+    #[serde(default = "full")]
+    pub food: u8,
+    #[serde(default)]
+    pub saturation: f32,
+    /// The bed to come back to, at its foot.
+    #[serde(default)]
+    pub bed: Option<BlockPos>,
+    #[serde(default)]
+    pub xp: u32,
+    /// Item names by number, as items were numbered when this was saved: content packs come and go
+    /// between runs, and the numbers with them. Saves from before there was such a list go by the
+    /// numbering the world opened with.
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+const fn full() -> u8 {
+    20
+}
+
+/// A boat or a cart left somewhere, kept with the world.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedVehicle {
+    pub kind: zenith_protocol::EntityKind,
+    pub pos: DVec3,
+    pub yaw: u16,
+    /// A cart's place on its rails, and its speed along them.
+    #[serde(default)]
+    pub track: Option<crate::entity::Track>,
+    #[serde(default)]
+    pub speed: f64,
+}
+
+fn vehicles_path(dir: &Path) -> PathBuf {
+    dir.join("vehicles.json")
+}
+
+/// The boats and carts a world was left with; none for a world that never had any.
+pub fn read_vehicles(dir: &Path) -> Vec<SavedVehicle> {
+    fs::read(vehicles_path(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+pub fn write_vehicles(dir: &Path, list: &[SavedVehicle]) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(list).map_err(io::Error::other)?;
+    write_atomic(&vehicles_path(dir), &bytes)
 }
 
 /// A block that holds more than its state.
@@ -45,13 +97,29 @@ pub struct PlayerSave {
 pub enum BlockEntity {
     Chest(Vec<Slot>),
     Furnace(Furnace),
+    /// What a sign says, line by line.
+    Sign(Vec<String>),
+    /// What is cooking on a campfire: each thing, and how many ticks it still needs.
+    Campfire(Vec<(u16, u16)>),
 }
 
-/// What a chunk saves: sections the generator would not make, and its block entities.
+/// What a chunk saves: sections the generator would not make, its block entities, and what the
+/// item numbers in them meant when they were saved.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChunkRecord {
     pub sections: Vec<(u8, Vec<u8>)>,
     pub block_entities: Vec<(BlockPos, BlockEntity)>,
+    /// Item names by number, as items were numbered when the record was written, if its block
+    /// entities hold any. Empty, the record goes by the numbering the world opened with: so do
+    /// records from before there was such a list.
+    pub items: Vec<String>,
+}
+
+/// A record as it was before it kept its item names.
+#[derive(Deserialize)]
+struct RecordWithoutNames {
+    sections: Vec<(u8, Vec<u8>)>,
+    block_entities: Vec<(BlockPos, BlockEntity)>,
 }
 
 impl ChunkRecord {
@@ -59,7 +127,29 @@ impl ChunkRecord {
         postcard::to_stdvec(self).expect("records always serialise")
     }
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
+        // An old record ends where the names would start, so reading it as a new one fails.
+        postcard::from_bytes(bytes).ok().or_else(|| {
+            let old: RecordWithoutNames = postcard::from_bytes(bytes).ok()?;
+            Some(Self { sections: old.sections, block_entities: old.block_entities, items: Vec::new() })
+        })
+    }
+
+    /// Puts the numbers in its block entities into today's numbering: by its own names if it has
+    /// them, or else by `opened_with`, the numbering the world was opened with.
+    pub fn renumber(&mut self, reg: &Registry, opened_with: &ItemRemap) {
+        if self.block_entities.is_empty() {
+            return;
+        }
+        let own;
+        let remap = if self.items.is_empty() {
+            opened_with
+        } else {
+            own = ItemRemap::new(&self.items, reg);
+            &own
+        };
+        for (_, be) in &mut self.block_entities {
+            remap.block_entity(be);
+        }
     }
 }
 
@@ -76,7 +166,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 pub fn read_level(dir: &Path) -> io::Result<Option<LevelMeta>> {
     let path = dir.join("level.json");
     match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
@@ -122,7 +214,7 @@ impl ItemRemap {
         }
     }
     pub fn inventory(&self, inv: &mut Inventory) {
-        inv.slots.iter_mut().for_each(|s| self.slot(s));
+        inv.slots.iter_mut().chain(inv.armor.iter_mut()).for_each(|s| self.slot(s));
         self.slot(&mut inv.cursor);
     }
     pub fn block_entity(&self, be: &mut BlockEntity) {
@@ -133,12 +225,20 @@ impl ItemRemap {
                 self.slot(&mut f.fuel);
                 self.slot(&mut f.output);
             }
+            BlockEntity::Sign(_) => {}
+            BlockEntity::Campfire(cooking) => cooking.retain_mut(|(item, _)| match self.0.get(*item as usize) {
+                Some(&new) if new != u16::MAX => {
+                    *item = new;
+                    true
+                }
+                _ => false,
+            }),
         }
     }
 }
 
 enum Job {
-    Save(Box<Chunk>, Vec<(BlockPos, BlockEntity)>),
+    Save(Box<Chunk>, Vec<(BlockPos, BlockEntity)>, Arc<[String]>),
     Read(ChunkPos, Box<dyn FnOnce(Option<Vec<u8>>) + Send>),
     Commit(Option<Sender<io::Result<()>>>),
 }
@@ -159,9 +259,10 @@ impl Disk {
         Ok((Self { tx, thread: Some(thread) }, saved))
     }
 
-    /// Queues a chunk to be saved. Encoding happens on the disk thread.
-    pub fn save(&self, chunk: Chunk, block_entities: Vec<(BlockPos, BlockEntity)>) {
-        let _ = self.tx.send(Job::Save(Box::new(chunk), block_entities));
+    /// Queues a chunk to be saved, with the names its block entities' item numbers stand for.
+    /// Encoding happens on the disk thread.
+    pub fn save(&self, chunk: Chunk, block_entities: Vec<(BlockPos, BlockEntity)>, items: Arc<[String]>) {
+        let _ = self.tx.send(Job::Save(Box::new(chunk), block_entities, items));
     }
 
     /// Calls `then` on the disk thread with the chunk's saved bytes.
@@ -197,8 +298,8 @@ impl Drop for Disk {
 fn disk_thread(mut store: RegionStore, rx: Receiver<Job>) {
     while let Ok(job) = rx.recv() {
         match job {
-            Job::Save(chunk, block_entities) => {
-                let record = ChunkRecord { sections: chunk.encode_modified(), block_entities };
+            Job::Save(chunk, block_entities, items) => {
+                let record = ChunkRecord { sections: chunk.encode_modified(), block_entities, items: items.to_vec() };
                 if let Err(e) = store.write(chunk.pos, &record.to_bytes()) {
                     eprintln!("zenith: could not save chunk {:?}: {e}", chunk.pos);
                 }
@@ -278,6 +379,22 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_record_from_before_item_names_still_reads() {
+        #[derive(Serialize)]
+        struct Before {
+            sections: Vec<(u8, Vec<u8>)>,
+            block_entities: Vec<(BlockPos, BlockEntity)>,
+        }
+        let be = (BlockPos::new(1, 70, 3), BlockEntity::Chest(vec![None; 3]));
+        let bytes =
+            postcard::to_stdvec(&Before { sections: vec![(4, vec![1, 2, 3])], block_entities: vec![be.clone()] })
+                .expect("encodes");
+        let record = ChunkRecord::from_bytes(&bytes).expect("decodes");
+        assert_eq!((record.sections, record.block_entities), (vec![(4, vec![1, 2, 3])], vec![be]));
+        assert!(record.items.is_empty());
+    }
+
+    #[test]
     fn a_chunk_saved_through_the_disk_thread_reads_back() {
         let dir = TempDir::new("disk");
         let pos = ChunkPos::new(3, -4);
@@ -287,7 +404,7 @@ mod tests {
         {
             let (disk, saved) = Disk::open(&dir.0).expect("open");
             assert!(saved.is_empty());
-            disk.save(chunk.clone(), vec![be.clone()]);
+            disk.save(chunk.clone(), vec![be.clone()], Arc::from(vec!["stone".to_string()]));
             disk.commit_wait().expect("commit");
         }
         let (disk, saved) = Disk::open(&dir.0).expect("reopen");
@@ -297,6 +414,7 @@ mod tests {
         let bytes = rx.recv().expect("read").expect("saved");
         let record = ChunkRecord::from_bytes(&bytes).expect("decodes");
         assert_eq!(record.block_entities, vec![be]);
+        assert_eq!(record.items, vec!["stone".to_string()]);
         let mut loaded = Chunk::empty(pos);
         loaded.apply_encoded(&record.sections).expect("applies");
         assert_eq!(loaded.get(1, 70, 1), BlockState::of(id::STONE));
@@ -310,7 +428,7 @@ mod tests {
         for i in 0..50u16 {
             let mut chunk = Chunk::empty(pos);
             chunk.set(0, 0, 0, BlockState::new(id::STONE, (i % 16) as u8));
-            disk.save(chunk, Vec::new());
+            disk.save(chunk, Vec::new(), Arc::from(Vec::new()));
             let (tx, rx) = mpsc::channel();
             disk.read(pos, move |bytes| tx.send(bytes).expect("send"));
             let record = ChunkRecord::from_bytes(&rx.recv().expect("read").expect("saved")).expect("decodes");

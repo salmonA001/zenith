@@ -16,6 +16,11 @@ fn open(reg: &Registry, state: zenith_content::BlockState) -> bool {
     !reg.lut.collides[state.kind() as usize] && def.fluid != Fluid::Lava && def.contact_damage == 0
 }
 
+/// Whether a block stands taller than its cell, as a fence does: nothing steps or jumps up onto it.
+fn too_tall(reg: &Registry, state: zenith_content::BlockState) -> bool {
+    reg.block(state).shape.collision(state.meta()).iter().any(|b| b[1][1] > 16)
+}
+
 /// Whether a body can stay at `p`: it fits, and something holds it up.
 pub fn can_stand(w: &impl BlockAccess, reg: &Registry, p: BlockPos) -> bool {
     if !fits(w, reg, p) {
@@ -23,7 +28,7 @@ pub fn can_stand(w: &impl BlockAccess, reg: &Registry, p: BlockPos) -> bool {
     }
     let (here, below) = (w.block(p), w.block(p.add(0, -1, 0)));
     let (d_here, d_below) = (reg.block(here), reg.block(below));
-    (reg.lut.collides[below.kind() as usize] && d_below.contact_damage == 0)
+    (reg.lut.collides[below.kind() as usize] && d_below.contact_damage == 0 && !too_tall(reg, below))
         || d_here.fluid == Fluid::Water
         || d_below.fluid == Fluid::Water
         || d_here.climbable
@@ -75,7 +80,13 @@ fn cost_to(a: BlockPos, b: BlockPos) -> i32 {
 
 /// The cells from `start` (not included) to `goal`. If `goal` cannot be reached within `max_nodes`
 /// cells of searching, the path ends at the cell that got closest, or is `None` if that is `start`.
-pub fn find(w: &impl BlockAccess, reg: &Registry, start: BlockPos, goal: BlockPos, max_nodes: usize) -> Option<Vec<BlockPos>> {
+pub fn find(
+    w: &impl BlockAccess,
+    reg: &Registry,
+    start: BlockPos,
+    goal: BlockPos,
+    max_nodes: usize,
+) -> Option<Vec<BlockPos>> {
     if start == goal {
         return Some(Vec::new());
     }
@@ -192,7 +203,7 @@ mod tests {
     #[test]
     fn it_will_not_walk_through_lava() {
         let mut w = flat();
-        for z in -40..=40 {
+        for z in -40i32..=40 {
             for x in 2..=4 {
                 if z.abs() < 32 {
                     w.set(BlockPos::new(x, 61, z), BlockState::of(id::LAVA));
@@ -209,7 +220,11 @@ mod tests {
     fn an_unreachable_goal_gets_as_close_as_it_can() {
         let mut w = flat();
         // A sealed box around the goal.
-        walls(&mut w, (4..=8).flat_map(|x| (-2..=2).map(move |z| (x, z))).filter(|&(x, z)| x == 4 || x == 8 || z.abs() == 2), 4);
+        walls(
+            &mut w,
+            (4..=8).flat_map(|x| (-2i32..=2).map(move |z| (x, z))).filter(|&(x, z)| x == 4 || x == 8 || z.abs() == 2),
+            4,
+        );
         let reg = Registry::builtin();
         let path = find(&w, &reg, BlockPos::new(0, 61, 0), BlockPos::new(6, 61, 0), 300).expect("partial");
         assert_eq!(*path.last().expect("end"), BlockPos::new(3, 61, 0));

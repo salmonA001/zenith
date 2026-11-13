@@ -1,7 +1,7 @@
 //! How blocks behave: fluids, gravity, things that need support, growth, and signal circuits.
 use crate::world::{ServerWorld, WorldEvent};
 use zenith_content::{BlockState, Fluid, ItemStack, Shape, id};
-use zenith_core::pos::{MIN_Y, SECTIONS};
+use zenith_core::pos::{MAX_Y, MIN_Y, SECTIONS};
 use zenith_core::{BlockPos, ChunkPos, Dir, FxMap, FxSet, Rng};
 use zenith_protocol::EffectKind;
 use zenith_world::BlockAccess;
@@ -51,7 +51,48 @@ fn neighbour_changed(w: &mut ServerWorld, p: BlockPos) {
         return;
     }
     match kind {
+        // Anything solid on farmland packs it back down to dirt.
+        id::FARMLAND | id::FARMLAND_WET if w.reg.lut.collides[w.block(p.offset(Dir::Up)).kind() as usize] => {
+            w.set(p, BlockState::of(id::DIRT));
+        }
+        // Half a bed without its other half goes too, leaving nothing: the half that was broken
+        // left the bed.
+        id::BED | id::BED_HEAD => {
+            let toward = crate::player::bed_toward(state.meta());
+            let (other, want) =
+                if kind == id::BED { (p.offset(toward), id::BED_HEAD) } else { (p.offset(toward.opposite()), id::BED) };
+            if w.block(other).kind() != want && w.is_loaded(other) {
+                w.set(p, BlockState::AIR);
+            }
+        }
+        // A rail turns to join the rails around it.
+        id::RAIL | id::BOOST_RAIL => {
+            let shape = crate::rails::shape_for(&*w, p, state.meta());
+            if shape != state.meta() {
+                w.set(p, BlockState::new(kind, shape));
+            }
+        }
+        // A fence joins what it can, whenever a neighbour changes.
+        id::FENCE => {
+            let joined = fence_joins(w, p);
+            if joined != state.meta() {
+                w.set(p, BlockState::new(id::FENCE, joined));
+            }
+        }
+        // A door's halves go together, and the bottom one needs a floor.
+        id::DOOR => {
+            let top = state.meta() & 8 != 0;
+            let other = if top { p.offset(Dir::Down) } else { p.offset(Dir::Up) };
+            let partner = w.block(other);
+            let whole = partner.kind() == id::DOOR && (partner.meta() & 8 != 0) != top;
+            if !whole && w.is_loaded(other) {
+                w.set(p, BlockState::AIR);
+            } else if !top && !w.reg.lut.collides[w.block(p.offset(Dir::Down)).kind() as usize] {
+                break_block(w, p, true);
+            }
+        }
         id::WIRE | id::LEVER | id::LAMP | id::LAMP_LIT | id::INVERTER | id::INVERTER_OFF => w.schedule(p, 1),
+        id::FIRE => w.schedule(p, FIRE_FLARE),
         id::TNT if powered(w, p) => {
             w.set(p, BlockState::AIR);
             w.events.push(WorldEvent::Prime { pos: p });
@@ -84,6 +125,7 @@ fn tick_block(w: &mut ServerWorld, p: BlockPos) {
                 let kind = if lit { id::LAMP_LIT } else { id::LAMP };
                 w.set(p, BlockState::of(kind));
             }
+            id::FIRE => tick_fire(w, p, state),
             id::INVERTER | id::INVERTER_OFF => {
                 let input = powered(w, p.offset(Dir::Down));
                 let kind = if input { id::INVERTER_OFF } else { id::INVERTER };
@@ -94,11 +136,61 @@ fn tick_block(w: &mut ServerWorld, p: BlockPos) {
     }
 }
 
+/// How long a fire burns between flares, in ticks, give or take.
+const FIRE_FLARE: u64 = 25;
+/// How many flares a fire lasts.
+const FIRE_LIFE: u8 = 15;
+
+/// One flare of a fire. It takes what will burn of the blocks around it, often moving in where they
+/// were; catches in the air beside anything that burns, close by; and dies with nothing under it
+/// and nothing to feed on, with nothing to feed on before long, or when it has burned its time.
+/// So it runs through a wood and along a wall of planks, and never crosses bare ground.
+fn tick_fire(w: &mut ServerWorld, p: BlockPos, state: BlockState) {
+    let burns = |w: &ServerWorld, q: BlockPos| w.reg.block(w.block(q)).flammable;
+    let age = state.meta();
+    let fed = Dir::ALL.iter().any(|&d| burns(w, p.offset(d)) > 0);
+    let floor = w.reg.lut.collides[w.block(p.offset(Dir::Down)).kind() as usize];
+    if (!floor && !fed) || age >= FIRE_LIFE || (!fed && w.rng.chance(0.4)) {
+        w.set(p, BlockState::AIR);
+        return;
+    }
+    for d in Dir::ALL {
+        let q = p.offset(d);
+        let chance = burns(w, q);
+        if chance == 0 || w.rng.below(100) >= u32::from(chance) {
+            continue;
+        }
+        if w.block(q).kind() == id::TNT {
+            w.set(q, BlockState::AIR);
+            w.events.push(WorldEvent::Prime { pos: q });
+        } else {
+            let after = if w.rng.chance(0.7) { BlockState::of(id::FIRE) } else { BlockState::AIR };
+            w.set(q, after);
+        }
+    }
+    for _ in 0..3 {
+        let q = p.add(w.rng.range(-1, 1), w.rng.range(-1, 2), w.rng.range(-1, 1));
+        if q != p
+            && w.is_loaded(q)
+            && w.block(q).is_air()
+            && Dir::ALL.iter().any(|&d| burns(w, q.offset(d)) > 0)
+            && w.rng.chance(0.35)
+        {
+            w.set(q, BlockState::of(id::FIRE));
+        }
+    }
+    w.set(p, BlockState::new(id::FIRE, age + 1));
+    let wait = FIRE_FLARE + u64::from(w.rng.below(FIRE_FLARE as u32));
+    w.schedule(p, wait);
+}
+
 /// Whether a falling block would keep falling through this cell.
 fn falls_into(w: &ServerWorld, p: BlockPos) -> bool {
     let state = w.block(p);
     let def = w.reg.block(state);
-    p.y >= MIN_Y && !w.reg.lut.collides[state.kind() as usize] && (state.is_air() || def.fluid != Fluid::None || def.replaceable)
+    p.y >= MIN_Y
+        && !w.reg.lut.collides[state.kind() as usize]
+        && (state.is_air() || def.fluid != Fluid::None || def.replaceable)
 }
 
 /// Whether the thing at `p` still has what it rests on.
@@ -127,8 +219,44 @@ pub fn has_support(w: &ServerWorld, p: BlockPos, state: BlockState) -> bool {
             let below = w.block(p.offset(Dir::Down));
             solid(p.offset(Dir::Down)) || w.reg.block(below).tint == zenith_content::Tint::Foliage
         }
+        Shape::Crop => matches!(w.block(p.offset(Dir::Down)).kind(), id::FARMLAND | id::FARMLAND_WET),
         _ => solid(p.offset(Dir::Down)),
     }
+}
+
+/// Which sides a fence at `p` joins: other fences, gates, and whole blocks. Bits north, south, west, east.
+pub fn fence_joins(w: &ServerWorld, p: BlockPos) -> u8 {
+    let mut joined = 0;
+    for (bit, d) in Dir::HORIZONTAL.into_iter().enumerate() {
+        let n = w.block(p.offset(d));
+        if matches!(n.kind(), id::FENCE | id::GATE) || w.reg.lut.opaque[n.kind() as usize] {
+            joined |= 1 << bit;
+        }
+    }
+    joined
+}
+
+/// Opens what is shut or shuts what is open: a door (both halves), a trapdoor or a gate. Returns
+/// whether there was anything to swing.
+pub fn swing(w: &mut ServerWorld, p: BlockPos) -> bool {
+    let state = w.block(p);
+    let flipped = |s: BlockState| BlockState::new(s.kind(), s.meta() ^ 4);
+    match state.kind() {
+        id::DOOR => {
+            let other = if state.meta() & 8 != 0 { p.offset(Dir::Down) } else { p.offset(Dir::Up) };
+            let partner = w.block(other);
+            w.set(p, flipped(state));
+            if partner.kind() == id::DOOR {
+                w.set(other, flipped(partner));
+            }
+        }
+        id::TRAPDOOR | id::GATE => {
+            w.set(p, flipped(state));
+        }
+        _ => return false,
+    }
+    w.effect(EffectKind::Open, p.center());
+    true
 }
 
 /// Breaks the block at `p`, leaving its drop if `drops` is set.
@@ -143,6 +271,34 @@ pub fn break_block(w: &mut ServerWorld, p: BlockPos, drops: bool) {
 
 /// Leaves what a block drops when broken without a tool in question.
 pub fn drop_block(w: &mut ServerWorld, p: BlockPos, state: BlockState) {
+    let give = |w: &mut ServerWorld, name: &str, count: i32| {
+        if let Some(item) = w.reg.item_by_name(name)
+            && count > 0
+        {
+            w.events.push(WorldEvent::DropItem { pos: p.center(), stack: ItemStack::new(item, count as u8) });
+        }
+    };
+    match state.kind() {
+        // Wild grass now and then has seeds in it.
+        id::TALL_GRASS | id::FERN => {
+            if w.rng.chance(0.125) {
+                give(w, zenith_content::it::SEEDS, 1);
+            }
+            return;
+        }
+        // A ripe crop gives its grain and seeds to sow again; an unripe one, the seed it grew from.
+        id::GRAIN => {
+            if state.meta() >= 7 {
+                give(w, zenith_content::it::GRAIN, 1);
+                let seeds = w.rng.range(1, 3);
+                give(w, zenith_content::it::SEEDS, seeds);
+            } else {
+                give(w, zenith_content::it::SEEDS, 1);
+            }
+            return;
+        }
+        _ => {}
+    }
     let def = w.reg.block(state);
     let (lo, hi) = (def.drop_min as i32, def.drop_max as i32);
     let name = def.drop.clone().unwrap_or_else(|| def.name.clone());
@@ -171,10 +327,13 @@ fn can_flow_into(w: &ServerWorld, p: BlockPos, kind: u16) -> bool {
         return false;
     }
     let def = w.reg.block(s);
-    s.is_air() || (def.fluid == Fluid::None && (def.replaceable || def.shape == Shape::Cross || def.shape == Shape::Flat || def.shape == Shape::Torch))
+    s.is_air()
+        || (def.fluid == Fluid::None
+            && (def.replaceable || def.shape == Shape::Cross || def.shape == Shape::Flat || def.shape == Shape::Torch))
 }
 
-fn flow_into(w: &mut ServerWorld, p: BlockPos, state: BlockState) {
+/// Puts a fluid in a cell, washing out whatever small thing was there.
+pub(crate) fn flow_into(w: &mut ServerWorld, p: BlockPos, state: BlockState) {
     let there = w.block(p);
     if !there.is_air() {
         drop_block(w, p, there);
@@ -210,7 +369,8 @@ fn tick_fluid(w: &mut ServerWorld, p: BlockPos, state: BlockState, fluid: Fluid)
             }
         }
         let below = w.block(p.offset(Dir::Down));
-        let on_solid_or_source = w.reg.lut.collides[below.kind() as usize] || (below.kind() == kind && below.meta() == 0);
+        let on_solid_or_source =
+            w.reg.lut.collides[below.kind() as usize] || (below.kind() == kind && below.meta() == 0);
         let wanted = if fluid == Fluid::Water && sources >= 2 && on_solid_or_source {
             BlockState::new(kind, 0)
         } else if above_same {
@@ -258,10 +418,11 @@ fn tick_fluid(w: &mut ServerWorld, p: BlockPos, state: BlockState, fluid: Fluid)
         }
         if can_flow_into(w, n, kind) {
             flow_into(w, n, BlockState::new(kind, next));
-        } else if let Some(m) = fluid_at(w, n, kind) {
-            if m & 8 == 0 && m & 7 > next {
-                w.schedule(n, delay);
-            }
+        } else if let Some(m) = fluid_at(w, n, kind)
+            && m & 8 == 0
+            && m & 7 > next
+        {
+            w.schedule(n, delay);
         }
     }
 }
@@ -411,7 +572,11 @@ fn has_log_nearby(w: &ServerWorld, start: BlockPos) -> bool {
             if is_log(s.kind()) {
                 return true;
             }
-            if depth < 5 && w.reg.block(s).tint == zenith_content::Tint::Foliage && s.kind() != id::FERN && seen.insert(n) {
+            if depth < 5
+                && w.reg.block(s).tint == zenith_content::Tint::Foliage
+                && s.kind() != id::FERN
+                && seen.insert(n)
+            {
                 frontier.push((n, depth + 1));
             }
         }
@@ -427,7 +592,19 @@ pub fn random_ticks(w: &mut ServerWorld, chunks: &[ChunkPos]) {
             let Some(chunk) = w.map.chunks.get(&pos) else { break };
             let section = &chunk.sections[s];
             let wants_ticks = section.values().iter().take(64).any(|&v| {
-                matches!(BlockState(v).kind(), id::GRASS | id::SAPLING | id::OAK_LEAVES | id::BIRCH_LEAVES | id::PINE_LEAVES | id::ACACIA_LEAVES | id::DIRT)
+                matches!(
+                    BlockState(v).kind(),
+                    id::GRASS
+                        | id::SAPLING
+                        | id::GRAIN
+                        | id::FARMLAND
+                        | id::FARMLAND_WET
+                        | id::OAK_LEAVES
+                        | id::BIRCH_LEAVES
+                        | id::PINE_LEAVES
+                        | id::ACACIA_LEAVES
+                        | id::DIRT
+                )
             });
             if !wants_ticks {
                 continue;
@@ -441,9 +618,85 @@ pub fn random_ticks(w: &mut ServerWorld, chunks: &[ChunkPos]) {
     }
 }
 
+/// Whether there is water within four blocks across, level with this one or a block up.
+fn near_water(w: &ServerWorld, p: BlockPos) -> bool {
+    (-4..=4)
+        .any(|dx| (-4..=4).any(|dz| (0..=1).any(|dy| w.reg.block(w.block(p.add(dx, dy, dz))).fluid == Fluid::Water)))
+}
+
 fn random_tick(w: &mut ServerWorld, p: BlockPos) {
+    tick_randomly(w, p);
+}
+
+/// Whether a plant at `p` has the light it needs: the sky, overhead or past the side of a roof,
+/// through little enough in the way, or a lamp, torch or glowing block a few steps off. Light is
+/// never kept on the server, so this works out the part of it that matters, the way the mesher
+/// works out all of it: falling one a step, and nine of fifteen is enough.
+fn has_light_to_grow(w: &ServerWorld, p: BlockPos) -> bool {
+    const ENOUGH: i32 = 9;
+    let lut = &w.reg.lut;
+    let sky = |c: BlockPos, mut lost: i32| {
+        for y in c.y + 1..=MAX_Y {
+            lost += i32::from(lut.opacity[w.block(BlockPos::new(c.x, y, c.z)).kind() as usize]);
+            if 15 - lost < ENOUGH {
+                return false;
+            }
+        }
+        true
+    };
+    if sky(p, 0)
+        || Dir::HORIZONTAL.into_iter().any(|d| {
+            let side = p.offset(d);
+            !lut.opaque[w.block(side).kind() as usize] && sky(side, 1)
+        })
+    {
+        return true;
+    }
+    const REACH: i32 = 15 - ENOUGH;
+    for dy in -REACH..=REACH {
+        for dz in -REACH..=REACH {
+            for dx in -REACH..=REACH {
+                let steps = dx.abs() + dy.abs() + dz.abs();
+                if steps <= REACH {
+                    let glow = lut.emission[w.block(p.add(dx, dy, dz)).kind() as usize];
+                    if i32::from(glow) - steps >= ENOUGH {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// One random tick of the block at `p`.
+pub(crate) fn tick_randomly(w: &mut ServerWorld, p: BlockPos) {
     let state = w.block(p);
     match state.kind() {
+        // Crops grow under open sky or a light, faster in watered soil.
+        id::GRAIN if state.meta() < 7 => {
+            let wet = w.block(p.offset(Dir::Down)).kind() == id::FARMLAND_WET;
+            if has_light_to_grow(w, p) && w.rng.chance(if wet { 0.6 } else { 0.25 }) {
+                w.set(p, BlockState::new(id::GRAIN, state.meta() + 1));
+            }
+        }
+        // Farmland soaks up water nearby, and dries out without it; dry and bare, it goes back to dirt.
+        id::FARMLAND | id::FARMLAND_WET => {
+            let wet = near_water(w, p);
+            let planted = w.block(p.offset(Dir::Up)).kind() == id::GRAIN;
+            match (state.kind(), wet) {
+                (id::FARMLAND, true) => {
+                    w.set(p, BlockState::of(id::FARMLAND_WET));
+                }
+                (id::FARMLAND_WET, false) => {
+                    w.set(p, BlockState::of(id::FARMLAND));
+                }
+                (id::FARMLAND, false) if !planted && w.rng.chance(0.3) => {
+                    w.set(p, BlockState::of(id::DIRT));
+                }
+                _ => {}
+            }
+        }
         id::GRASS => {
             let above = w.block(p.offset(Dir::Up));
             if w.reg.lut.opaque[above.kind() as usize] {
@@ -462,21 +715,19 @@ fn random_tick(w: &mut ServerWorld, p: BlockPos) {
                 grow_sapling(w, p);
             }
         }
-        id::OAK_LEAVES | id::BIRCH_LEAVES | id::PINE_LEAVES | id::ACACIA_LEAVES => {
+        id::OAK_LEAVES | id::BIRCH_LEAVES | id::PINE_LEAVES | id::ACACIA_LEAVES
             // Bit 0 marks leaves a player placed, which stay.
-            if state.meta() & 1 == 0 && w.rng.chance(0.2) && !has_log_nearby(w, p) {
+            if state.meta() & 1 == 0 && w.rng.chance(0.2) && !has_log_nearby(w, p) => {
                 if w.rng.chance(0.05) {
                     if let Some(item) = w.reg.item_by_name("sapling") {
                         w.events.push(WorldEvent::DropItem { pos: p.center(), stack: ItemStack::new(item, 1) });
                     }
-                } else if w.rng.chance(0.04) {
-                    if let Some(item) = w.reg.item_by_name("apple") {
+                } else if w.rng.chance(0.04)
+                    && let Some(item) = w.reg.item_by_name("apple") {
                         w.events.push(WorldEvent::DropItem { pos: p.center(), stack: ItemStack::new(item, 1) });
                     }
-                }
                 w.set(p, BlockState::AIR);
             }
-        }
         _ => {}
     }
 }
@@ -745,6 +996,39 @@ pub(crate) mod tests {
         }
         assert_eq!(w.block(near).kind(), id::OAK_LEAVES);
         assert!(w.block(far).is_air());
+    }
+
+    #[test]
+    fn fire_takes_what_burns_dies_out_and_never_crosses_bare_stone() {
+        let mut w = flat_world();
+        let at = |x: i32| BlockPos::new(x, 61, 0);
+        // A row of wool, a gap of bare stone, and one block of wool beyond it.
+        for x in 0..=4 {
+            w.set(at(x), BlockState::of(id::WOOL_WHITE));
+        }
+        w.set(at(9), BlockState::of(id::WOOL_WHITE));
+        w.set(at(0).offset(Dir::Up), BlockState::of(id::FIRE));
+        let mut burning = false;
+        for _ in 0..6000 {
+            w.tick += 1;
+            run(&mut w);
+            burning |= (1..=4).any(|x| w.block(at(x)).kind() == id::FIRE);
+        }
+        assert!(burning, "it ran along the row");
+        let left = (0..=4).filter(|&x| w.block(at(x)).kind() == id::WOOL_WHITE).count();
+        assert!(left <= 1, "{left} of five blocks of wool are left");
+        assert_eq!(w.block(at(9)).kind(), id::WOOL_WHITE, "the far one was out of reach");
+        let fires = (-3..14)
+            .flat_map(|x| (60..66).map(move |y| (x, y)))
+            .filter(|&(x, y)| (-2..=2).any(|z| w.block(BlockPos::new(x, y, z)).kind() == id::FIRE));
+        assert_eq!(fires.count(), 0, "and it has all gone out");
+        // On bare stone a fire burns a while, and goes out by itself.
+        w.set(BlockPos::new(-6, 61, 5), BlockState::of(id::FIRE));
+        for _ in 0..2000 {
+            w.tick += 1;
+            run(&mut w);
+        }
+        assert!(w.block(BlockPos::new(-6, 61, 5)).is_air());
     }
 
     #[test]

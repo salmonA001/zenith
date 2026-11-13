@@ -36,7 +36,7 @@ fn grad3(hash: u8, x: f64, y: f64, z: f64) -> f64 {
 #[inline]
 fn grad2(hash: u8, x: f64, y: f64) -> f64 {
     // Eight directions: the axes, and diagonals scaled to the same length.
-    const D: f64 = 0.707_106_781_186_547_6;
+    const D: f64 = std::f64::consts::FRAC_1_SQRT_2;
     match hash & 7 {
         0 => x,
         1 => -x,

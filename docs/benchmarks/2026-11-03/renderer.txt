@@ -1,0 +1,25 @@
+tools/bench-client.sh 8 16 32, release build, 1920x1080, no window, frame rate uncapped.
+
+After the streaming fix: the client asks for chunks on every poll, not only on its 20 ticks a
+second, and its worker pools leave the frame a core of their own. The machine was also running a
+video call, a game and an animated wallpaper, all drawing on the same GPU.
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 2.1 s | 432 | 2.36 | 3.59 | 0.84 | 433 | 75287 | 22 |
+| 16 | 1.7 s | 278 | 3.71 | 10.57 | 1.62 | 1818 | 333051 | 83 |
+| 32 | 2.9 s | 158 | 6.32 | 11.27 | 3.00 | 7032 | 1460236 | 360 |
+
+Before the fix, an hour earlier, with the GPU less busy. Drawing a loaded view is the same code in
+both runs; only loading changed.
+
+| view distance | time to a complete view | fps | frame ms (average) | frame ms (p99) | CPU ms a frame | sections drawn | quads | vertex MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 3.5 s | 480 | 2.12 | 2.71 | 0.95 | 433 | 75287 | 22 |
+| 16 | 7.1 s | 333 | 3.03 | 3.77 | 1.41 | 1818 | 333051 | 83 |
+| 32 | 23.1 s | 196 | 5.14 | 6.36 | 2.81 | 7032 | 1460236 | 360 |
+
+Repeat runs of the same build on the busy machine gave 387-432 fps at view distance 8, 239-282 at
+16 and 153-177 at 32, while the CPU time a frame stayed within 0.2 ms. The time to a complete view
+varied by under half a second. Sampling one run at view distance 32 every few seconds showed frames
+of up to 30 ms in the first ten seconds and none over 9 ms after that.

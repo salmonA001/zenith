@@ -1,0 +1,6 @@
+seed 2026, 1089 chunks around the spawn point
+generation, one thread:       0.46 ms a chunk,    2193 chunks a second
+generation, 16 threads:      0.07 ms a chunk,   14873 chunks a second
+light and mesh, one thread:   2.88 ms a chunk,     347 chunks a second
+mesh size:                   102.3 KiB a chunk, 1310 quads a chunk, 20 bytes a vertex
+merging faces:            1566 exposed faces a chunk become 1133 opaque quads: 1.4 times fewer (counted in 1.7 s)
